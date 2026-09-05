@@ -2430,11 +2430,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "/Users/mc/Desktop/Accident_Detection_Backend/Accident_Detection_Backend.csproj",
+      "projectUniqueName": "/Users/mc/Desktop/FypProjectPush/Accident_Detection_Backend/Accident_Detection_Backend.csproj",
       "projectName": "Accident_Detection_Backend",
-      "projectPath": "/Users/mc/Desktop/Accident_Detection_Backend/Accident_Detection_Backend.csproj",
+      "projectPath": "/Users/mc/Desktop/FypProjectPush/Accident_Detection_Backend/Accident_Detection_Backend.csproj",
       "packagesPath": "/Users/mc/.nuget/packages/",
-      "outputPath": "/Users/mc/Desktop/Accident_Detection_Backend/obj/",
+      "outputPath": "/Users/mc/Desktop/FypProjectPush/Accident_Detection_Backend/obj/",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "/Users/mc/.nuget/NuGet/NuGet.Config"
@@ -2922,5 +2922,17 @@
         }
       }
     }
-  }
+  },
+  "logs": [
+    {
+      "code": "NU1903",
+      "level": "Warning",
+      "warningLevel": 1,
+      "message": "Package 'Microsoft.OpenApi' 2.4.1 has a known high severity vulnerability, https://github.com/advisories/GHSA-v5pm-xwqc-g5wc",
+      "libraryId": "Microsoft.OpenApi",
+      "targetGraphs": [
+        "net10.0"
+      ]
+    }
+  ]
 }

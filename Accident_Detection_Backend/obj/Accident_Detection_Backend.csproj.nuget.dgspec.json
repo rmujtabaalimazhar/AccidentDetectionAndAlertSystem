@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "/Users/mc/Desktop/Accident_Detection_Backend/Accident_Detection_Backend.csproj": {}
+    "/Users/mc/Desktop/FypProjectPush/Accident_Detection_Backend/Accident_Detection_Backend.csproj": {}
   },
   "projects": {
-    "/Users/mc/Desktop/Accident_Detection_Backend/Accident_Detection_Backend.csproj": {
+    "/Users/mc/Desktop/FypProjectPush/Accident_Detection_Backend/Accident_Detection_Backend.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "/Users/mc/Desktop/Accident_Detection_Backend/Accident_Detection_Backend.csproj",
+        "projectUniqueName": "/Users/mc/Desktop/FypProjectPush/Accident_Detection_Backend/Accident_Detection_Backend.csproj",
         "projectName": "Accident_Detection_Backend",
-        "projectPath": "/Users/mc/Desktop/Accident_Detection_Backend/Accident_Detection_Backend.csproj",
+        "projectPath": "/Users/mc/Desktop/FypProjectPush/Accident_Detection_Backend/Accident_Detection_Backend.csproj",
         "packagesPath": "/Users/mc/.nuget/packages/",
-        "outputPath": "/Users/mc/Desktop/Accident_Detection_Backend/obj/",
+        "outputPath": "/Users/mc/Desktop/FypProjectPush/Accident_Detection_Backend/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "/Users/mc/.nuget/NuGet/NuGet.Config"
