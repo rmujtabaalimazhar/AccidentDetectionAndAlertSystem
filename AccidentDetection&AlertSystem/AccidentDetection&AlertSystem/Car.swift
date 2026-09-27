@@ -7,12 +7,14 @@ struct Car: Codable, Identifiable {
     var make: String?
     var uid: String
     var categoryId: Int
+    var steeringSide: String?
     
-    init(registrationNo: String, make: String?, uid: String, categoryId: Int) {
+    init(registrationNo: String, make: String?, uid: String, categoryId: Int, steeringSide: String? = "Right-Hand") {
         self.registrationNo = registrationNo
         self.make = make
         self.uid = uid
         self.categoryId = categoryId
+        self.steeringSide = steeringSide
     }
     
     enum CodingKeys: String, CodingKey {
@@ -21,6 +23,7 @@ struct Car: Codable, Identifiable {
         case make, Make
         case uid, Uid
         case categoryId, category_Id, Category_Id
+        case steeringSide, steering_Side, Steering_Side
     }
     
     init(from decoder: Decoder) throws {
@@ -43,6 +46,10 @@ struct Car: Codable, Identifiable {
         categoryId = try container.decodeIfPresent(Int.self, forKey: .categoryId) ??
                      container.decodeIfPresent(Int.self, forKey: .category_Id) ??
                      container.decodeIfPresent(Int.self, forKey: .Category_Id) ?? 1
+
+        steeringSide = try container.decodeIfPresent(String.self, forKey: .steeringSide) ??
+                       container.decodeIfPresent(String.self, forKey: .steering_Side) ??
+                       container.decodeIfPresent(String.self, forKey: .Steering_Side) ?? "Right-Hand"
     }
     
     func encode(to encoder: Encoder) throws {
@@ -52,5 +59,6 @@ struct Car: Codable, Identifiable {
         try container.encodeIfPresent(make, forKey: .Make)
         try container.encode(uid, forKey: .Uid)
         try container.encode(categoryId, forKey: .Category_Id)
+        try container.encodeIfPresent(steeringSide, forKey: .Steering_Side)
     }
 }

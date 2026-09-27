@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Accident_Detection_Backend")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+1286d66f0feb2fd96a7f1246ea2064ab46a56e7f")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f9211de02cc02286c5d6ee25af13ba03cdc6920d")]
 [assembly: System.Reflection.AssemblyProductAttribute("Accident_Detection_Backend")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Accident_Detection_Backend")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

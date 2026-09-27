@@ -35,7 +35,8 @@ namespace Accident_Detection_Backend.Controllers
                         Car_Id = c.Car_Id,
                         Make = c.Make,
                         Registration_No = c.Registration_No,
-                        Category_Id = c.Category_Id
+                        Category_Id = c.Category_Id,
+                        Steering_Side = c.Steering_Side
                     })
                     .ToList();
 
@@ -59,6 +60,11 @@ namespace Accident_Detection_Backend.Controllers
                     string.IsNullOrWhiteSpace(car.Uid))
                 {
                     return BadRequest("Invalid vehicle data");
+                }
+
+                if (string.IsNullOrWhiteSpace(car.Steering_Side))
+                {
+                    car.Steering_Side = "Right-Hand";
                 }
 
                 if (db.Cars.Any(c => c.Registration_No == car.Registration_No))

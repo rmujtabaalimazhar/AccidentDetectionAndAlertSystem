@@ -19,6 +19,7 @@ class AccidentDetector: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var cabinDamage: Double = 0
     @Published var status: String = "SAFE"
     @Published var lastEvent: String = "-"
+    @Published var passengerSeverity: String = "None (AIS 0)"
     
     @Published var accelX: Double = 0
     @Published var accelY: Double = 0
@@ -132,9 +133,9 @@ class AccidentDetector: NSObject, ObservableObject, CLLocationManagerDelegate {
 
         let directional = max(abs(linX), abs(linY))
 
-        if acc > ACCEL_THRESHOLD && jerk > 2 && directional > 1.5 {
+        if acc > ACCEL_THRESHOLD && jerk > 0.6 && directional > 0.3 {
             confirm += 1
-            if confirm < 2 { return }
+            if confirm < 1 { return }
         } else {
             confirm = 0
             return
@@ -172,13 +173,20 @@ class AccidentDetector: NSObject, ObservableObject, CLLocationManagerDelegate {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        let clientSeverity = acc > 7.0 ? "High" : (acc > 4.0 ? "Medium" : "Low")
+        let timeIso = ISO8601DateFormatter().string(from: Date())
+
         let body: [String: Any] = [
+            "CarId": 1,
             "Car_Id": 1,
             "Acceleration": acc,
-            "GyroX": linX,
-            "GyroY": linY,
+            "AccelX": linX,
+            "AccelY": linY,
+            "AccelZ": linZ,
             "Latitude": loc.coordinate.latitude,
-            "Longitude": loc.coordinate.longitude
+            "Longitude": loc.coordinate.longitude,
+            "Severity": clientSeverity,
+            "Time": timeIso
         ]
 
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -192,15 +200,18 @@ class AccidentDetector: NSObject, ObservableObject, CLLocationManagerDelegate {
 
                     let damage = json["cabinDamage"] as? Double ?? 0
                     let impact = json["impactForce"] as? Double ?? 0
+                    let serverTime = json["time"] as? String ?? Date().formatted()
 
                     let special = self.detectSpecial(linX: linX, linY: linY, linZ: linZ)
                     let side = special ?? (json["impactSide"] as? String ?? "-")
+                    let passSev = json["passengerSeverity"] as? String ?? (json["severity"] as? String ?? "Safe")
 
                     self.impactSide = side
                     self.force = impact > 0 ? "ON" : "OFF"
                     self.cabinDamage = damage
                     self.status = impact > 0 ? "ACCIDENT" : "SAFE"
-                    self.lastEvent = Date().formatted()
+                    self.lastEvent = serverTime
+                    self.passengerSeverity = passSev
                 }
             }
         }.resume()
@@ -223,9 +234,22 @@ struct MonitoringView: View {
                      : "✅ Monitoring (Safe)")
                     .font(.title3.weight(.bold))
 
+                // CAR PICTURE & AFFECTED AREA VISUALIZER
+                makeCarImpactVisualizer(
+                    make: "Selected Car",
+                    plate: "-",
+                    categoryId: 1,
+                    isAccident: detector.status == "ACCIDENT",
+                    impactSide: detector.impactSide,
+                    cabinDamage: detector.cabinDamage
+                )
+
                 // INFO BLOCK
                 VStack(spacing: 10) {
                     Text("Impact Side: \(detector.impactSide)")
+                    Text("Passenger Severity: \(detector.passengerSeverity)")
+                        .bold()
+                        .foregroundColor(detector.status == "ACCIDENT" ? .red : .primary)
                     Text("Force: \(detector.force)")
                     Text("Damage: \(Int(detector.cabinDamage))%")
                     Text("Last Event: \(detector.lastEvent)")

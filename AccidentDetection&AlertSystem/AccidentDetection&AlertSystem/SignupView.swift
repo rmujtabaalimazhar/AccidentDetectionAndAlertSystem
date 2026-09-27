@@ -10,6 +10,9 @@ struct SignupView: View {
     @State private var email: String = ""
     @State private var password: String = ""
     @State private var message: String = ""
+    @State private var isRescueSignup: Bool = false
+    @State private var rescueLocation: String = ""
+    @StateObject private var geo = GeolocationService.shared
     
     var body: some View {
         ZStack {
@@ -21,7 +24,7 @@ struct SignupView: View {
             )
             .ignoresSafeArea()
             
-            VStack(spacing: 20) {
+            VStack(spacing: 16) {
                 
                 // Back Button
                 HStack {
@@ -32,92 +35,101 @@ struct SignupView: View {
                 }
                 .padding(.horizontal)
                 
-                Spacer()
-                
                 // Icon
                 Circle()
                     .fill(LinearGradient(
                         colors: [Color.red, Color.orange],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing))
-                    .frame(width: 70, height: 70)
+                    .frame(width: 64, height: 64)
                     .overlay(
-                        Image(systemName: "person.badge.plus")
-                            .font(.system(size: 28))
+                        Image(systemName: isRescueSignup ? "cross.case.fill" : "person.badge.plus")
+                            .font(.system(size: 26))
                             .foregroundColor(.white)
                     )
-                Text("Create Account")
+                Text(isRescueSignup ? "Register Rescue Unit" : "Create Account")
                     .font(.title2.weight(.bold))
                 
-                Text("Register to get started")
+                Text(isRescueSignup ? "Register your rescue team with current location" : "Register to get started")
                     .foregroundColor(.gray)
+                    .font(.caption)
+                
+                // Segmented picker
+                Picker("Account Type", selection: $isRescueSignup) {
+                    Text("Driver / User").tag(false)
+                    Text("Rescue Team").tag(true)
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .padding(.horizontal)
                 
                 // Form Card
-                VStack(spacing: 15) {
+                VStack(spacing: 14) {
                     
-                    // Name
-                    HStack(spacing: 15) {
-                        Image(systemName: "person")
-                            .foregroundColor(.blue)
+                    if !isRescueSignup {
+                        // Regular user fields
+                        HStack(spacing: 15) {
+                            Image(systemName: "person").foregroundColor(.blue)
+                            TextField("Full Name", text: $name)
+                        }
+                        .padding(12).background(Color(.systemGray6)).cornerRadius(10)
                         
-                        TextField("Full Name", text: $name)
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(10)
-                    
-                    
-                    // Contact
-                    HStack(spacing: 15) {
-                        Image(systemName: "phone")
-                            .foregroundColor(.blue)
+                        HStack(spacing: 15) {
+                            Image(systemName: "phone").foregroundColor(.blue)
+                            TextField("Contact Number", text: $contact)
+                                .keyboardType(.phonePad)
+                        }
+                        .padding(12).background(Color(.systemGray6)).cornerRadius(10)
                         
-                        TextField("Contact Number", text: $contact)
-                            .keyboardType(.phonePad)
+                        HStack(spacing: 15) {
+                            Image(systemName: "envelope").foregroundColor(.blue)
+                            TextField("Email", text: $email)
+                                .keyboardType(.emailAddress)
+                                .autocapitalization(.none)
+                        }
+                        .padding(12).background(Color(.systemGray6)).cornerRadius(10)
+                    } else {
+                        // Rescue specific location field
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Current Rescue Base Location").font(.caption.weight(.semibold)).foregroundColor(.gray)
+                                Spacer()
+                                if let coord = geo.currentCoordinate {
+                                    Button("Use GPS") {
+                                        rescueLocation = GeolocationService.formatCoordinate(coord)
+                                    }
+                                    .font(.caption2.bold())
+                                    .foregroundColor(.blue)
+                                }
+                            }
+                            
+                            HStack(spacing: 12) {
+                                Image(systemName: "location.fill").foregroundColor(.red)
+                                TextField("e.g. 33.6844,73.0479", text: $rescueLocation)
+                                    .autocapitalization(.none)
+                            }
+                            .padding(12).background(Color(.systemGray6)).cornerRadius(10)
+                        }
                     }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(10)
-                    
-                    
-                    // Email
-                    HStack(spacing: 15) {
-                        Image(systemName: "envelope")
-                            .foregroundColor(.blue)
-                        
-                        TextField("Email", text: $email)
-                            .keyboardType(.emailAddress)
-                            .autocapitalization(.none)
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(10)
-                    
                     
                     // Password
                     HStack(spacing: 15) {
-                        Image(systemName: "lock")
-                            .foregroundColor(.blue)
-                        
+                        Image(systemName: "lock").foregroundColor(.blue)
                         SecureField("Password", text: $password)
                     }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(10)
-                    
+                    .padding(12).background(Color(.systemGray6)).cornerRadius(10)
                     
                     // Register Button
                     Button(action: handleSubmit) {
                         HStack {
-                            Image(systemName: "person.badge.plus")
-                            Text("Register")
+                            Image(systemName: isRescueSignup ? "cross.case.fill" : "person.badge.plus")
+                            Text(isRescueSignup ? "Register Rescue Unit" : "Register")
                                 .font(.body.weight(.semibold))
                         }
                         .frame(maxWidth: .infinity)
-                        .padding()
+                        .padding(12)
                         .background(
                             LinearGradient(
-                                colors: [Color.red, Color.orange],
+                                colors: isRescueSignup ? [Color.red, Color.purple] : [Color.red, Color.orange],
                                 startPoint: .leading,
                                 endPoint: .trailing
                             )
@@ -141,6 +153,11 @@ struct SignupView: View {
                 Spacer()
             }
             .padding()
+            .onAppear {
+                if let coord = geo.currentCoordinate {
+                    rescueLocation = GeolocationService.formatCoordinate(coord)
+                }
+            }
         }
     }
     
@@ -160,6 +177,15 @@ struct SignupView: View {
     // MARK: - Logic
     
     func handleSubmit() {
+        if isRescueSignup {
+            if password.isEmpty {
+                message = "Please enter a password for rescue registration"
+                return
+            }
+            registerRescue()
+            return
+        }
+        
         if name.isEmpty || contact.isEmpty || email.isEmpty || password.isEmpty {
             message = "Please fill all fields"
             return
@@ -179,6 +205,56 @@ struct SignupView: View {
         
         // Call the backend API
         registerUser()
+    }
+    
+    func registerRescue() {
+        guard let url = URL(string: "\(AppConfig.apiBaseURL)/Rescue/Register") else {
+            message = "Invalid API URL"
+            return
+        }
+        
+        let loc = rescueLocation.trimmingCharacters(in: .whitespaces).isEmpty ? "0.0,0.0" : rescueLocation.trimmingCharacters(in: .whitespaces)
+        let body: [String: Any] = [
+            "Password": password,
+            "Location": loc
+        ]
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: body) else { return }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonData
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    message = "Network error: \(error.localizedDescription)"
+                    return
+                }
+                
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    message = "Invalid server response"
+                    return
+                }
+                
+                if (200...299).contains(httpResponse.statusCode) {
+                    if let data = data,
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let rid = json["rid"] as? Int {
+                        message = "Rescue Unit Registered! Your Rescue ID is #\(rid). Save it to login."
+                    } else {
+                        message = "Rescue Unit Registered Successfully!"
+                    }
+                    
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                        onSignupSuccess()
+                    }
+                } else {
+                    message = "Failed to register rescue unit"
+                }
+            }
+        }.resume()
     }
     
     func registerUser() {

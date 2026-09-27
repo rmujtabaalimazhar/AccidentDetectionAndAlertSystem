@@ -10,14 +10,18 @@ struct VehicleScreen: View {
     @State private var plateNumber = ""
     @State private var make = ""
     @State private var selectedCarType: String? = nil
+    @State private var selectedSteeringSide: String = "Right-Hand"
     @State private var vehicles: [Car] = []
     @State private var showDropdown = false
     
     let carTypes = ["SUV", "Hatchback", "Sedan"]
+    let steeringSides = ["Right-Hand", "Left-Hand"]
     
     // For navigation in SwiftUI
     @State private var navigateToDashboard = false
     @State private var selectedCarForDashboard: Car? = nil
+    @State private var showFamilyMembers = false
+    @State private var showGuardianAlerts = false
     
     func categoryName(id: Int) -> String {
         switch id {
@@ -81,7 +85,8 @@ struct VehicleScreen: View {
             "Registration_No": plateNumber,
             "Make": make,
             "Uid": uid,
-            "Category_Id": categoryId(name: carType)
+            "Category_Id": categoryId(name: carType),
+            "Steering_Side": selectedSteeringSide
         ]
         
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -124,6 +129,7 @@ struct VehicleScreen: View {
         plateNumber = ""
         make = ""
         selectedCarType = nil
+        selectedSteeringSide = "Right-Hand"
     }
 
     @ViewBuilder
@@ -134,6 +140,8 @@ struct VehicleScreen: View {
             uid: uid,
             make: selectedCarForDashboard?.make ?? "",
             plate: selectedCarForDashboard?.registrationNo ?? "",
+            categoryId: selectedCarForDashboard?.categoryId ?? 1,
+            steeringSide: selectedCarForDashboard?.steeringSide ?? "Right-Hand",
             onLogout: onLogout
         )
     }
@@ -142,6 +150,39 @@ struct VehicleScreen: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 16) {
+                    // Quick Action Emergency & Family Bar
+                    HStack(spacing: 12) {
+                        Button(action: { showFamilyMembers = true }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "person.2.fill")
+                                    .font(.system(size: 15))
+                                Text("Family / Guardians")
+                                    .font(.system(size: 13, weight: .bold))
+                            }
+                            .foregroundColor(.blue)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.white)
+                            .cornerRadius(12)
+                            .shadow(color: Color.black.opacity(0.04), radius: 3)
+                        }
+                        
+                        Button(action: { showGuardianAlerts = true }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "bell.fill")
+                                    .font(.system(size: 15))
+                                Text("Guardian Alerts")
+                                    .font(.system(size: 13, weight: .bold))
+                            }
+                            .foregroundColor(.red)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.white)
+                            .cornerRadius(12)
+                            .shadow(color: Color.black.opacity(0.04), radius: 3)
+                        }
+                    }
+                    
                     ForEach(vehicles) { car in
                         CarCardView(car: car, onSelect: {
                             self.selectedCarForDashboard = car
@@ -162,6 +203,22 @@ struct VehicleScreen: View {
                         } label: {
                             HStack {
                                 Text(selectedCarType ?? "Select car type").foregroundColor(.black)
+                                Spacer()
+                                Image(systemName: "chevron.down").foregroundColor(.black)
+                            }
+                            .padding(12)
+                            .background(Color(white: 0.933))
+                            .cornerRadius(8)
+                        }
+                        
+                        Text("Steering Side").padding(.top, 10)
+                        Menu {
+                            ForEach(steeringSides, id: \.self) { side in
+                                Button(side) { selectedSteeringSide = side }
+                            }
+                        } label: {
+                            HStack {
+                                Text(selectedSteeringSide).foregroundColor(.black)
                                 Spacer()
                                 Image(systemName: "chevron.down").foregroundColor(.black)
                             }
@@ -218,16 +275,36 @@ struct VehicleScreen: View {
                 .navigationTitle("Select Vehicle")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button(action: { showFamilyMembers = true }) {
+                            Image(systemName: "person.2.fill")
+                                .foregroundColor(.blue)
+                        }
+                    }
                     ToolbarItem(placement: .navigationBarTrailing) {
-                        Button(action: onLogout) {
-                            Image(systemName: "rectangle.portrait.and.arrow.right")
-                                .foregroundColor(.red)
+                        HStack(spacing: 12) {
+                            Button(action: { showGuardianAlerts = true }) {
+                                Image(systemName: "bell.badge.fill")
+                                    .foregroundColor(.red)
+                            }
+                            Button(action: onLogout) {
+                                Image(systemName: "rectangle.portrait.and.arrow.right")
+                                    .foregroundColor(.red)
+                            }
                         }
                     }
                 }
             }
             .navigationViewStyle(StackNavigationViewStyle())
             .background(Color(red: 233/255, green: 227/255, blue: 221/255).edgesIgnoringSafeArea(.all))
+            .sheet(isPresented: $showFamilyMembers) {
+                FamilyMembersView(uid: uid)
+            }
+            .sheet(isPresented: $showGuardianAlerts) {
+                AlertsView(mode: .guardian, identifier: uid, onLogout: onLogout, onDismiss: {
+                    showGuardianAlerts = false
+                })
+            }
             .onAppear {
                 fetchUserVehicles()
             }
@@ -249,9 +326,15 @@ struct VehicleScreen: View {
                         .foregroundColor(.white)
                         .clipShape(Circle())
                     
-                    VStack(alignment: .leading) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(car.make ?? "").bold()
-                        Text(categoryName).foregroundColor(.gray)
+                        HStack(spacing: 6) {
+                            Text(categoryName)
+                            Text("•")
+                            Text(car.steeringSide ?? "Right-Hand")
+                        }
+                        .font(.caption)
+                        .foregroundColor(.gray)
                     }
                     Spacer()
                     Button(action: onRemove) {

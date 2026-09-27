@@ -24,6 +24,9 @@ builder.Services.AddCors(options =>
 //adding location service
 builder.Services.AddHttpClient<LocationService>();
 
+// Register push notification service
+builder.Services.AddHttpClient<PushNotificationService>();
+
 
 
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");

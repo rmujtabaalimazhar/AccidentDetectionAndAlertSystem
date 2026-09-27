@@ -1,0 +1,24 @@
+{
+  "Simulator Target Bundle": "fyp.AccidentDetection-AlertSystem",
+  "aps": {
+    "alert": {
+      "title": "🚨 EMERGENCY: Accident Detected!",
+      "subtitle": "High Severity Collision",
+      "body": "Ali (Honda Civic, LEA-1234) has been involved in an accident near 31.4582, 74.2811. Tap to view emergency details."
+    },
+    "sound": "default",
+    "badge": 1,
+    "category": "EMERGENCY_ALERT_CATEGORY",
+    "interruption-level": "critical",
+    "content-available": 1
+  },
+  "alertId": 101,
+  "accidentId": 55,
+  "driverName": "Ali",
+  "carMake": "Honda Civic",
+  "plateNumber": "LEA-1234",
+  "location": "31.4582, 74.2811",
+  "severity": "High",
+  "impactForce": 14200.0,
+  "cabinDamage": 85.0
+}

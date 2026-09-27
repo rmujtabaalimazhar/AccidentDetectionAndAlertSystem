@@ -24,6 +24,9 @@ namespace Accident_Detection_Backend.Models
               [Required]
         public int Category_Id { get; set; }
 
+        [MaxLength(20)]
+        public string Steering_Side { get; set; } = "Right-Hand";
+
         // --- ADD THESE ATTRIBUTES ---
         
         [JsonIgnore]

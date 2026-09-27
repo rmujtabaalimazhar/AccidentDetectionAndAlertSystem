@@ -25,8 +25,20 @@ namespace Accident_Detection_Backend.Models
         [Column(TypeName = "decimal(10,2)")]
         public decimal? CabinForce { get; set; }
 
+        [StringLength(50)]
+        public string? Severity { get; set; }
+
         // Timestamp of when the accident was recorded
-        public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+        [Column("Time")]
+        public DateTime Time { get; set; } = DateTime.Now;
+
+        // Backward compatibility alias for any legacy references
+        [NotMapped]
+        public DateTime CreatedAt
+        {
+            get => Time;
+            set => Time = value;
+        }
 
         // Navigation Property
         [ForeignKey("Car_Id")]

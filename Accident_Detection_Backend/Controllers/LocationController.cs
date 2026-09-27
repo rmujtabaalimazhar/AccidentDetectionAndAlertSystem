@@ -57,13 +57,21 @@ namespace Accident_Detection_Backend.Controllers
                 if (damage > 100) damage = 100;
 
                 // ================= SAVE =================
+                string severity = !string.IsNullOrWhiteSpace(request.Severity)
+                    ? request.Severity
+                    : (damage >= 70 ? "High" : damage >= 30 ? "Medium" : "Low");
+
+                DateTime eventTime = request.Time ?? DateTime.Now;
+
                 Accident accident = new Accident()
                 {
                     Car_Id = request.CarId,
                     Location = request.Location ?? "Unknown",
                     Impact_Side = request.ImpactSide, // Used ImpactSide from model
                     ImpactForce = (decimal)force,
-                    CabinForce = (decimal)damage
+                    CabinForce = (decimal)damage,
+                    Severity = severity,
+                    Time = eventTime
                 };
 
                 db.Accidents.Add(accident);
@@ -71,17 +79,27 @@ namespace Accident_Detection_Backend.Controllers
                 // ✅ IMPORTANT: CHECK RESULT
                 int result = db.SaveChanges();
 
-                // 🔥 DEBUG LOG
-                System.Diagnostics.Debug.WriteLine("Rows Affected: " + result);
-
                 if (result > 0)
                 {
+                    // Generate unread alert for family members and rescue
+                    var alert = new Alert
+                    {
+                        Accident_Id = accident.Accident_Id,
+                        Time = accident.Time,
+                        Status = false
+                    };
+                    db.Alerts.Add(alert);
+                    db.SaveChanges();
+
                     return Ok(new
                     {
                         message = "Saved Successfully",
                         saved = true,
                         force,
-                        damage
+                        damage,
+                        severity = accident.Severity,
+                        time = accident.Time.ToString("yyyy-MM-dd HH:mm:ss"),
+                        alertId = alert.Alert_Id
                     });
                 }
                 else
@@ -112,6 +130,8 @@ namespace Accident_Detection_Backend.Controllers
                         impactSide = "-",
                         force = "OFF",
                         cabinDamage = 0,
+                        severity = "-",
+                        time = (DateTime?)null,
                         lastEvent = "-"
                     });
                 }
@@ -121,7 +141,9 @@ namespace Accident_Detection_Backend.Controllers
                     impactSide = last.Impact_Side,
                     force = (last.ImpactForce.HasValue && last.ImpactForce > 0) ? "ON" : "OFF",
                     cabinDamage = last.CabinForce ?? 0,
-                    lastEvent = DateTime.Now
+                    severity = last.Severity ?? "-",
+                    time = last.Time,
+                    lastEvent = last.Time.ToString("yyyy-MM-dd HH:mm:ss")
                 });
             }
             catch (Exception ex)
