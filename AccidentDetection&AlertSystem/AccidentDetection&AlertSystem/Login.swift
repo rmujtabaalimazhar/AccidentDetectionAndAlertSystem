@@ -8,6 +8,8 @@ struct LoginView: View {
     
     @State private var email: String = ""
     @State private var password: String = ""
+    @State private var rescueId: String = ""
+    @State private var rescuePassword: String = ""
     @State private var message: String = ""
     @State private var isRescueLogin: Bool = false
     
@@ -24,128 +26,239 @@ struct LoginView: View {
             )
             .ignoresSafeArea()
             
-            VStack(spacing: 20) {
-                
-                Spacer()
-                
-                // Logo
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.red, Color.orange],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+            VStack(spacing: 12) {
+                // Fixed Header: Logo & Accident Detection Name
+                VStack(spacing: 8) {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.red, Color.orange],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
                         )
-                    )
-                    .frame(width: 80, height: 80)
-                    .overlay(
-                        Image(systemName: isRescueLogin ? "cross.case.fill" : "checkmark.shield.fill")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 35, height: 35)
-                            .foregroundColor(.white)
-                    )
-                // Title
-                Text(isRescueLogin ? "Rescue Portal" : "Accident Detection")
-                    .font(.title2.weight(.bold))
-                
-                Text(isRescueLogin ? "Login to access emergency dispatches" : "Login to your account")
-                    .foregroundColor(.gray)
+                        .frame(width: 80, height: 80)
+                        .overlay(
+                            Image(systemName: "checkmark.shield.fill")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 35, height: 35)
+                                .foregroundColor(.white)
+                        )
+                    
+                    Text("Accident Detection")
+                        .font(.title2.weight(.bold))
+                }
+                .padding(.top, 16)
                 
                 // Segmented control
-                Picker("Account Type", selection: $isRescueLogin) {
+                Picker("Account Type", selection: $isRescueLogin.animation(.easeInOut)) {
                     Text("Driver / User").tag(false)
                     Text("Rescue Team").tag(true)
                 }
                 .pickerStyle(SegmentedPickerStyle())
                 .padding(.horizontal)
+                .padding(.top, 30)
+            
                 
-                // Card Style Box
-                VStack(spacing: 15) {
-                    
-                    // Identifier Field
-                    VStack(alignment: .leading) {
-                        Text(isRescueLogin ? "Rescue ID (Rid)" : "Email")
-                            .font(.caption)
-                        
-                        TextField(isRescueLogin ? "Enter your Rescue ID (e.g. 1)" : "Enter your email", text: $email)
-                            .padding()
-                            .background(Color(.systemGray6))
-                            .cornerRadius(10)
-                            .autocapitalization(.none)
-                            .keyboardType(isRescueLogin ? .numberPad : .emailAddress)
+                // Scrollable & Swipeable Portals (Driver & Rescue Team)
+                TabView(selection: $isRescueLogin) {
+                    // Driver Portal
+                    ScrollView(showsIndicators: false) {
+                        driverPortalCard
+                            .padding(.horizontal)
+                            .padding(.top, 8)
+                            .padding(.bottom, 24)
                     }
+                    .tag(false)
                     
-                    // Password
-                    VStack(alignment: .leading) {
-                        HStack {
-                            Text("Password")
-                                .font(.caption)
-                            
-                            Spacer()
-                            
-                            if !isRescueLogin {
-                                Button("Forgot?") {
-                                    onShowForgotPassword()
-                                }
-                                .font(.caption)
-                                .foregroundColor(.blue)
-                            }
-                        }
-                        
-                        SecureField("Enter your password", text: $password)
-                            .padding()
-                            .background(Color(.systemGray6))
-                            .cornerRadius(10)
+                    // Rescue Team Portal
+                    ScrollView(showsIndicators: false) {
+                        rescuePortalCard
+                            .padding(.horizontal)
+                            .padding(.top, 8)
+                            .padding(.bottom, 24)
                     }
+                    .tag(true)
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+            }
+        }
+        .onChange(of: isRescueLogin) { _ in
+            message = ""
+        }
+    }
+    
+    // MARK: - Driver Portal View
+    private var driverPortalCard: some View {
+        VStack(spacing: 15) {
+            Text("Login to your account")
+                .foregroundColor(.gray)
+                .font(.subheadline)
+            
+            // Card Style Box
+            VStack(spacing: 15) {
+                // Identifier Field
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Email")
+                        .font(.caption)
                     
-                    // Login Button
-                    Button(action: handleLogin) {
-                        HStack {
-                            Image(systemName: "arrow.right.circle")
-                            Text(isRescueLogin ? "Login as Rescue" : "Login")
-                                .font(.body.weight(.semibold))
-                        }
-                        .frame(maxWidth: .infinity)
+                    TextField("Enter your email", text: $email)
                         .padding()
-                        .background(
-                            LinearGradient(
-                                colors: isRescueLogin ? [Color.red, Color.purple] : [Color.red, Color.orange],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .foregroundColor(.white)
+                        .background(Color(.systemGray6))
                         .cornerRadius(10)
-                    }
-                    
-                    // Message (Toast replacement)
-                    if !message.isEmpty {
-                        Text(message)
-                            .foregroundColor(.red)
+                        .autocapitalization(.none)
+                        .keyboardType(.emailAddress)
+                }
+                
+                // Password Field
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Password")
                             .font(.caption)
+                        
+                        Spacer()
+                        
+                        Button("Forgot?") {
+                            onShowForgotPassword()
+                        }
+                        .font(.caption)
+                        .foregroundColor(.blue)
                     }
-                }
-                .padding()
-                .background(Color.white)
-                .cornerRadius(15)
-                .shadow(radius: 5)
-                
-                // Signup
-                HStack {
-                    Text("Don't have an account?")
                     
-                    Button("Register Now") {
-                        onShowSignup()
-                    }
-                    .foregroundColor(.red)
-                    .font(.footnote.weight(.semibold))
+                    SecureField("Enter your password", text: $password)
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(10)
                 }
-                .font(.footnote)
                 
-                Spacer()
+                // Login Button
+                Button(action: handleDriverLogin) {
+                    HStack {
+                        Image(systemName: "arrow.right.circle")
+                        Text("Login")
+                            .font(.body.weight(.semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(
+                        LinearGradient(
+                            colors: [Color.red, Color.orange],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+                
+                // Message (Toast replacement)
+                if !message.isEmpty && !isRescueLogin {
+                    Text(message)
+                        .foregroundColor(.red)
+                        .font(.caption)
+                }
             }
             .padding()
+            .background(Color.white)
+            .cornerRadius(15)
+            .shadow(radius: 5)
+            
+            // Signup
+            HStack {
+                Text("Don't have an account?")
+                
+                Button("Register Now") {
+                    onShowSignup()
+                }
+                .foregroundColor(.red)
+                .font(.footnote.weight(.semibold))
+            }
+            .font(.footnote)
+            .padding(.top, 5)
+        }
+    }
+    
+    // MARK: - Rescue Team Portal View
+    private var rescuePortalCard: some View {
+        VStack(spacing: 15) {
+            Text("Login to access emergency dispatches")
+                .foregroundColor(.gray)
+                .font(.subheadline)
+            
+            // Card Style Box
+            VStack(spacing: 15) {
+                // Identifier Field
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Rescue ID (Rid)")
+                        .font(.caption)
+                    
+                    TextField("Enter your Rescue ID (e.g. 1)", text: $rescueId)
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(10)
+                        .autocapitalization(.none)
+                        .keyboardType(.numberPad)
+                }
+                
+                // Password Field
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Password")
+                            .font(.caption)
+                        Spacer()
+                    }
+                    
+                    SecureField("Enter your password", text: $rescuePassword)
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(10)
+                }
+                
+                // Login Button
+                Button(action: handleRescueLogin) {
+                    HStack {
+                        Image(systemName: "arrow.right.circle")
+                        Text("Login as Rescue")
+                            .font(.body.weight(.semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(
+                        LinearGradient(
+                            colors: [Color.red, Color.purple],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+                
+                // Message (Toast replacement)
+                if !message.isEmpty && isRescueLogin {
+                    Text(message)
+                        .foregroundColor(.red)
+                        .font(.caption)
+                }
+            }
+            .padding()
+            .background(Color.white)
+            .cornerRadius(15)
+            .shadow(radius: 5)
+            
+            // Signup
+            HStack {
+                Text("Don't have an account?")
+                
+                Button("Register Now") {
+                    onShowSignup()
+                }
+                .foregroundColor(.red)
+                .font(.footnote.weight(.semibold))
+            }
+            .font(.footnote)
+            .padding(.top, 5)
         }
     }
     
@@ -153,20 +266,23 @@ struct LoginView: View {
         let emailRegex = "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$"
         return NSPredicate(format: "SELF MATCHES %@", emailRegex).evaluate(with: email)
     }
-    // MARK: - Logic (Same as React)
     
+    // MARK: - Logic
     func handleLogin() {
+        if isRescueLogin {
+            handleRescueLogin()
+        } else {
+            handleDriverLogin()
+        }
+    }
+    
+    func handleDriverLogin() {
         if email.isEmpty || password.isEmpty {
             message = "Please enter both credentials"
             return
         }
         
-        if isRescueLogin {
-            loginRescue()
-            return
-        }
-        
-        // ✅ Email validation for regular user
+        // Email validation for regular user
         if !isValidEmail(email) {
             message = "Please enter a valid email address"
             return
@@ -181,8 +297,20 @@ struct LoginView: View {
         }
     }
     
+    func handleRescueLogin() {
+        let idToUse = rescueId.isEmpty ? email : rescueId
+        let passToUse = rescuePassword.isEmpty ? password : rescuePassword
+        if idToUse.isEmpty || passToUse.isEmpty {
+            message = "Please enter both credentials"
+            return
+        }
+        loginRescue()
+    }
+    
     func loginRescue() {
-        guard let rid = Int(email.trimmingCharacters(in: .whitespaces)), rid > 0 else {
+        let idToUse = rescueId.isEmpty ? email : rescueId
+        let passToUse = rescuePassword.isEmpty ? password : rescuePassword
+        guard let rid = Int(idToUse.trimmingCharacters(in: .whitespaces)), rid > 0 else {
             message = "Please enter a valid numeric Rescue ID (e.g. 1)"
             return
         }
@@ -198,7 +326,7 @@ struct LoginView: View {
         
         let body: [String: Any] = [
             "Rid": rid,
-            "Password": password
+            "Password": passToUse
         ]
         
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)

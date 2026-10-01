@@ -42,5 +42,11 @@ namespace Accident_Detection_Backend.Models
         public string? Location { get; set; }
         public double Latitude { get; set; }
         public double Longitude { get; set; }
+
+        // Scaling & Edge-Case Telemetry (Toy Testing Rig & Dynamic Scaling)
+        public double? ImpactDurationMs { get; set; }
+        public double? GForce { get; set; }
+        public double? ToyMassKg { get; set; }
+        public double? VehicleMassKg { get; set; }
     }
 }
