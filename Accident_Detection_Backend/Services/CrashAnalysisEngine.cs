@@ -51,10 +51,12 @@ namespace AccidentDetectionAndAlertSystem.Services
     public class CrashAnalysisEngine
     {
         private readonly CrashScalingConfig _config;
+        private readonly CrashFilterEngine _filterEngine;
 
-        public CrashAnalysisEngine(CrashScalingConfig config)
+        public CrashAnalysisEngine(CrashScalingConfig config, CrashFilterEngine? filterEngine = null)
         {
             _config = config ?? new CrashScalingConfig();
+            _filterEngine = filterEngine ?? new CrashFilterEngine(_config);
         }
 
         /// <summary>

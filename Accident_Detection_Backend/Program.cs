@@ -34,6 +34,7 @@ builder.Services.AddSingleton(sp =>
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AccidentDetectionAndAlertSystem.Configuration.CrashScalingConfig>>().Value);
 
 // Register Crash Analysis & Dynamic Scaling Engine
+builder.Services.AddSingleton<AccidentDetectionAndAlertSystem.Services.CrashFilterEngine>();
 builder.Services.AddSingleton<AccidentDetectionAndAlertSystem.Services.CrashAnalysisEngine>();
 
 
