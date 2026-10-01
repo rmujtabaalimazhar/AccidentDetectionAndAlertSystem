@@ -29,10 +29,17 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
     var carId: Int = 0
     var steeringSide: String = "Right-Hand"
     
-    // Calibrated thresholds for real-time impact detection
-    let IMPACT_THRESHOLD_ACC: Double = 8.5    // Requires palm hit shock (~0.87G); ignores single-finger taps & normal handling
-    let DEBOUNCE_MS: TimeInterval = 800       // 0.8s debounce prevents double-triggering while remaining fast and responsive
+    // 1. Calibrated Linear Acceleration Threshold (Gravity isolated: 0 m/s² rest baseline)
+    // 2.0 G (19.6 m/s²) catches lightweight toy car / RC collisions, but ignores finger taps
+    let IMPACT_THRESHOLD_ACC: Double = 19.6    // ~2.0 G (19.6 m/s² pure linear acceleration)
+    let DEBOUNCE_MS: TimeInterval = 800       // 0.8s debounce prevents double-triggering
+    let MIN_SUSTAINED_FRAMES: Int = 3         // Requires force to stay high for >= 3 consecutive frames (~40-60ms)
+    let MIN_DURATION_MS: Double = 35.0        // Minimum sustained impact duration in ms (filters taps <35ms)
     let WARMUP_READS = 10                     // Warmup buffer before sensor activation
+    
+    // Time check tracking for sustained impact window
+    private var highForceStartTime: Date? = nil
+    private var highForceFrameCount: Int = 0
     
     let motionManager = CMMotionManager()
     let locationManager = CLLocationManager()
@@ -214,7 +221,7 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         }
     }
     
-    func sendImpact(acceleration: Double, coords: CLLocationCoordinate2D, detectedSide: String = "Front", dynX: Double = 0, dynY: Double = 0, dynZ: Double = 0) {
+    func sendImpact(acceleration: Double, coords: CLLocationCoordinate2D, detectedSide: String = "Front", dynX: Double = 0, dynY: Double = 0, dynZ: Double = 0, durationMs: Double = 40.0) {
         let formatter = DateFormatter()
         formatter.timeStyle = .medium
         let currentTimeString = formatter.string(from: Date())
@@ -256,13 +263,16 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let clientSeverity = acceleration > 7.0 ? "High" : (acceleration > 4.0 ? "Medium" : "Low")
+        let gForce = acceleration / 9.81
+        let clientSeverity = gForce > 7.0 ? "High" : (gForce > 4.0 ? "Medium" : "Low")
         let isoFormatter = ISO8601DateFormatter()
         let timeIso = isoFormatter.string(from: now)
         
         let body: [String: Any] = [
             "CarId": carId,
             "Acceleration": acceleration,
+            "GForce": gForce,
+            "ImpactDurationMs": durationMs,
             "ImpactSide": detectedSide,
             "SteeringSide": steeringSide,
             "AccelX": dynX,
@@ -362,20 +372,20 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         }.resume()
     }
     
-    func confirmAccident(dynX: Double, dynY: Double, dynZ: Double, gravZ: Double, gyroX: Double, gyroY: Double, gyroZ: Double, acc: Double) {
+    func confirmAccident(dynX: Double, dynY: Double, dynZ: Double, gravZ: Double, gyroX: Double, gyroY: Double, gyroZ: Double, acc: Double, durationMs: Double = 40.0) {
         let now = Date()
         if now.timeIntervalSince(lastSent) * 1000 < DEBOUNCE_MS { return }
         
-        // Filter out extreme soft drops / sensor resets (> 70 m/s²)
-        if acc > 70 { return }
+        // Filter out extreme sensor resets (> 150 m/s²)
+        if acc > 150 { return }
         
         let gyroMagnitude = sqrt(gyroX*gyroX + gyroY*gyroY + gyroZ*gyroZ)
         let detectedSide = determineExactSide(dynX: dynX, dynY: dynY, dynZ: dynZ, gravZ: gravZ, gyroMag: gyroMagnitude)
         
-        debugStatus = String(format: "🚨 Verified %@! Acc=%.2f m/s²", detectedSide, acc)
+        debugStatus = String(format: "🚨 Verified %@! Acc=%.1f m/s² (%.0fms)", detectedSide, acc, durationMs)
         
         let coords = currentLocation ?? CLLocationCoordinate2D(latitude: 0, longitude: 0)
-        sendImpact(acceleration: acc, coords: coords, detectedSide: detectedSide, dynX: dynX, dynY: dynY, dynZ: dynZ)
+        sendImpact(acceleration: acc, coords: coords, detectedSide: detectedSide, dynX: dynX, dynY: dynY, dynZ: dynZ, durationMs: durationMs)
     }
     
     func startSensors() {
@@ -383,14 +393,16 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         self.prevAcc = 0
         self.shake = 0
         self.readCount = 0
+        self.highForceStartTime = nil
+        self.highForceFrameCount = 0
         self.debugStatus = "Calibrating sensors…"
         
         if motionManager.isDeviceMotionAvailable {
-            motionManager.deviceMotionUpdateInterval = 0.02 // 50Hz update for crisp palm hit detection
+            motionManager.deviceMotionUpdateInterval = 0.02 // 50Hz update (20ms per frame)
             motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, error in
                 guard let self = self, let motion = motion else { return }
                 
-                // Pure dynamic linear acceleration (gravity isolated in hardware by Apple sensor fusion)
+                // 1. Pure dynamic linear acceleration (gravity isolated to zero baseline by Apple sensor fusion)
                 let uX = motion.userAcceleration.x
                 let uY = motion.userAcceleration.y
                 let uZ = motion.userAcceleration.z
@@ -411,39 +423,61 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
                 self.gyroY = rY
                 self.gyroZ = rZ
                 
-                // Dynamic shock magnitude (in G and m/s²)
+                // Dynamic linear shock magnitude (in G and m/s²)
                 let dynMagnitude = sqrt(uX*uX + uY*uY + uZ*uZ)
-                let acc = dynMagnitude * 9.8
+                let linearAcc = dynMagnitude * 9.81
                 
                 self.shakeLevel = dynMagnitude
                 
                 self.readCount += 1
                 if self.readCount < self.WARMUP_READS {
-                    self.debugStatus = "Calibrating sensors (\(self.readCount)/\(self.WARMUP_READS))…"
+                    self.debugStatus = "Calibrating linear sensors (\(self.readCount)/\(self.WARMUP_READS))…"
                     return
                 }
                 
-                // Only trigger if shock exceeds threshold
-                if acc >= self.IMPACT_THRESHOLD_ACC {
-                    self.confirmAccident(
-                        dynX: uX,
-                        dynY: uY,
-                        dynZ: uZ,
-                        gravZ: gZ,
-                        gyroX: rX,
-                        gyroY: rY,
-                        gyroZ: rZ,
-                        acc: acc
-                    )
+                // 2. Time check / sustained impact window filter
+                if linearAcc >= self.IMPACT_THRESHOLD_ACC {
+                    if self.highForceStartTime == nil {
+                        self.highForceStartTime = Date()
+                        self.highForceFrameCount = 1
+                        self.debugStatus = String(format: "Spike detected (%.1f m/s²)... checking duration", linearAcc)
+                    } else {
+                        self.highForceFrameCount += 1
+                        let elapsedMs = Date().timeIntervalSince(self.highForceStartTime!) * 1000.0
+                        
+                        // Sustained impact window reached (>= 3 frames or >= 35ms)
+                        if self.highForceFrameCount >= self.MIN_SUSTAINED_FRAMES || elapsedMs >= self.MIN_DURATION_MS {
+                            self.confirmAccident(
+                                dynX: uX,
+                                dynY: uY,
+                                dynZ: uZ,
+                                gravZ: gZ,
+                                gyroX: rX,
+                                gyroY: rY,
+                                gyroZ: rZ,
+                                acc: linearAcc,
+                                durationMs: max(elapsedMs, self.MIN_DURATION_MS)
+                            )
+                            // Reset tracking after triggering
+                            self.highForceStartTime = nil
+                            self.highForceFrameCount = 0
+                        }
+                    }
                 } else {
+                    // Force dropped below threshold before duration check -> Discard finger tap!
+                    if self.highForceStartTime != nil {
+                        self.highForceStartTime = nil
+                        self.highForceFrameCount = 0
+                    }
+                    
                     let now = Date()
                     if now.timeIntervalSince(self.lastSent) * 1000 > self.DEBOUNCE_MS {
-                        self.debugStatus = String(format: "Monitoring: Live Acc=%.2f m/s²", acc)
+                        self.debugStatus = String(format: "Monitoring: Linear Acc=%.2f m/s² (%.2f G)", linearAcc, dynMagnitude)
                     }
                 }
             }
         } else if motionManager.isAccelerometerAvailable {
-            // Fallback for hardware without device motion
+            // Fallback for hardware without device motion: isolate gravity with high-pass filter
             motionManager.accelerometerUpdateInterval = 0.02
             motionManager.startAccelerometerUpdates(to: .main) { [weak self] data, error in
                 guard let self = self, let data = data else { return }
@@ -456,6 +490,7 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
                 self.gravityY = alpha * self.gravityY + (1.0 - alpha) * y
                 self.gravityZ = alpha * self.gravityZ + (1.0 - alpha) * z
                 
+                // Pure linear acceleration
                 let dynX = x - self.gravityX
                 let dynY = y - self.gravityY
                 let dynZ = z - self.gravityZ
@@ -465,23 +500,40 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
                 self.accelZ = dynZ
                 
                 let dynMagnitude = sqrt(dynX*dynX + dynY*dynY + dynZ*dynZ)
-                let acc = dynMagnitude * 9.8
+                let linearAcc = dynMagnitude * 9.81
                 self.shakeLevel = dynMagnitude
                 
                 self.readCount += 1
                 if self.readCount < self.WARMUP_READS { return }
                 
-                if acc >= self.IMPACT_THRESHOLD_ACC {
-                    self.confirmAccident(
-                        dynX: dynX,
-                        dynY: dynY,
-                        dynZ: dynZ,
-                        gravZ: self.gravityZ,
-                        gyroX: self.gyroX,
-                        gyroY: self.gyroY,
-                        gyroZ: self.gyroZ,
-                        acc: acc
-                    )
+                if linearAcc >= self.IMPACT_THRESHOLD_ACC {
+                    if self.highForceStartTime == nil {
+                        self.highForceStartTime = Date()
+                        self.highForceFrameCount = 1
+                    } else {
+                        self.highForceFrameCount += 1
+                        let elapsedMs = Date().timeIntervalSince(self.highForceStartTime!) * 1000.0
+                        if self.highForceFrameCount >= self.MIN_SUSTAINED_FRAMES || elapsedMs >= self.MIN_DURATION_MS {
+                            self.confirmAccident(
+                                dynX: dynX,
+                                dynY: dynY,
+                                dynZ: dynZ,
+                                gravZ: self.gravityZ,
+                                gyroX: self.gyroX,
+                                gyroY: self.gyroY,
+                                gyroZ: self.gyroZ,
+                                acc: linearAcc,
+                                durationMs: max(elapsedMs, self.MIN_DURATION_MS)
+                            )
+                            self.highForceStartTime = nil
+                            self.highForceFrameCount = 0
+                        }
+                    }
+                } else {
+                    if self.highForceStartTime != nil {
+                        self.highForceStartTime = nil
+                        self.highForceFrameCount = 0
+                    }
                 }
             }
             
