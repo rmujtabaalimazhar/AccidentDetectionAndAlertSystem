@@ -17,8 +17,8 @@ namespace AccidentDetectionAndAlertSystem.Configuration
         }
 
         // Thresholds for linear acceleration (1.8g - 2.2g without gravity) to eliminate tap false positives
-        public double MinimumCrashGForce { get; set; } = 2.0; // 2.0 G (~19.6 m/s² pure linear acceleration)
-        public double MinimumImpactDurationMs { get; set; } = 35.0; // Eliminates brief taps (<35ms)
+        public double MinimumCrashGForce { get; set; } =1.2 ;//  2.0; // 2.0 G (~19.6 m/s² pure linear acceleration)
+        public double MinimumImpactDurationMs { get; set; } =20; //35.0; // Eliminates brief taps (<35ms)
 
         // Pure IMU edge-case filters
         public double HardBrakingMaxGForce { get; set; } = 1.2;

@@ -102,14 +102,14 @@ namespace AccidentDetectionAndAlertSystem.Services
 
             if (request.Acceleration > 0)
             {
-                // CoreMotion / test rigs sending m/s^2 (e.g. > 25 m/s^2) vs direct G-units
-                return request.Acceleration >= 25.0 ? request.Acceleration / 9.81 : request.Acceleration;
+                // CoreMotion / test rigs sending m/s^2 (e.g. > 5.0 m/s^2) vs direct G-units
+                return request.Acceleration > 5.0 ? request.Acceleration / 9.81 : request.Acceleration;
             }
 
             double vectorMag = Math.Sqrt(request.AccelX * request.AccelX + request.AccelY * request.AccelY + request.AccelZ * request.AccelZ);
             if (vectorMag > 0)
             {
-                return vectorMag >= 25.0 ? vectorMag / 9.81 : vectorMag;
+                return vectorMag > 5.0 ? vectorMag / 9.81 : vectorMag;
             }
 
             return 0.0;
@@ -152,9 +152,10 @@ namespace AccidentDetectionAndAlertSystem.Services
                 return result;
             }
 
-            // Filter B: Speed Breaker / Road Hump (High pitch/vertical rotation with low linear deceleration)
+            // Filter B: Speed Breaker / Road Hump (Pure vertical pitch rotation with low horizontal collision impact)
+            double horizontalImpact = Math.Sqrt(request.AccelX * request.AccelX + request.AccelY * request.AccelY);
             double gz = Math.Abs(request.GyroZ);
-            if ((gz >= _config.SpeedBreakerGyroZThreshold || Math.Abs(request.AccelZ) > 3.0) && gForce < _config.SpeedBreakerGForceMax)
+            if (gz >= _config.SpeedBreakerGyroZThreshold && horizontalImpact < 0.6 && gForce < _config.SpeedBreakerGForceMax)
             {
                 result.IsCrash = false;
                 result.FilterReason = "Speed Breaker: Road hump pitch/yaw rotation without collision deceleration.";

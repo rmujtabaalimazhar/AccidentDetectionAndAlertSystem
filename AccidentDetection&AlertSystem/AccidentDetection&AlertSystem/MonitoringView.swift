@@ -31,10 +31,10 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
     
     // 1. Calibrated Linear Acceleration Threshold (Gravity isolated: 0 m/s² rest baseline)
     // 2.0 G (19.6 m/s²) catches lightweight toy car / RC collisions, but ignores finger taps
-    let IMPACT_THRESHOLD_ACC: Double = 19.6    // ~2.0 G (19.6 m/s² pure linear acceleration)
+    let IMPACT_THRESHOLD_ACC: Double = 11//19.6    // ~2.0 G (19.6 m/s² pure linear acceleration)
     let DEBOUNCE_MS: TimeInterval = 800       // 0.8s debounce prevents double-triggering
-    let MIN_SUSTAINED_FRAMES: Int = 3         // Requires force to stay high for >= 3 consecutive frames (~40-60ms)
-    let MIN_DURATION_MS: Double = 35.0        // Minimum sustained impact duration in ms (filters taps <35ms)
+    let MIN_SUSTAINED_FRAMES: Int =   2//3         // Requires force to stay high for >= 3 consecutive frames (~40-60ms)
+    let MIN_DURATION_MS: Double = 20   //35.0        // Minimum sustained impact duration in ms (filters taps <35ms)
     let WARMUP_READS = 10                     // Warmup buffer before sensor activation
     
     // Time check tracking for sustained impact window
@@ -226,28 +226,7 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         formatter.timeStyle = .medium
         let currentTimeString = formatter.string(from: Date())
         
-        if carId == 0 {
-            DispatchQueue.main.async {
-                self.sensorData = SensorData(
-                    accidentType: "Test (No Car ID)",
-                    rawSide: detectedSide,
-                    impactSide: detectedSide,
-                    force: "SHAKE DETECTED",
-                    cabinDamage: 0,
-                    severity: "Minor (AIS 1)",
-                    aisLevel: "AIS 1",
-                    passengerSeverity: "Minor (AIS 1)",
-                    passengerInjury: "Minor: Mild neck strain/whiplash, soft tissue pain.",
-                    driverSeverity: "Minor (AIS 1)",
-                    driverInjury: "Minor: Mild neck strain/whiplash, superficial bruising.",
-                    occupantSummary: "Test simulation without Car ID.",
-                    steeringSide: self.steeringSide,
-                    lastEvent: currentTimeString,
-                    status: "SAFE"
-                )
-            }
-            return
-        }
+        let effectiveCarId = carId > 0 ? carId : 1
         
         let now = Date()
         if now.timeIntervalSince(lastSent) * 1000 < DEBOUNCE_MS { return }
@@ -269,7 +248,8 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         let timeIso = isoFormatter.string(from: now)
         
         let body: [String: Any] = [
-            "CarId": carId,
+            "CarId": effectiveCarId,
+            "Car_Id": effectiveCarId,
             "Acceleration": acceleration,
             "GForce": gForce,
             "ImpactDurationMs": durationMs,
