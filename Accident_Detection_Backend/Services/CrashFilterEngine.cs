@@ -14,20 +14,15 @@ namespace AccidentDetectionAndAlertSystem.Services
 
         public bool IsValidCrash(double gForceMagnitude, double impactDurationMs)
         {
-            // 1. Filter low G-force events (Hard brakes / light handling)
+            // Filter 1: Magnitude cutoff (hard brakes / drifting < 4.5G)
             if (gForceMagnitude < _config.MinimumCrashGForce)
-            {
                 return false;
-            }
 
-            // 2. CRITICAL FILTER: Ignore brief phone taps / finger flicks (<35ms)
-            // Real structural car crashes deform over 50ms - 150ms.
-            if (impactDurationMs > 0 && impactDurationMs < _config.MinimumImpactDurationMs)
-            {
-                return false; 
-            }
+            // Filter 2: Duration cutoff (phone taps / finger flicks < 35ms)
+            if (impactDurationMs < _config.MinimumImpactDurationMs)
+                return false;
 
-            return true; // Confirmed valid impact event
+            return true; // Valid structural collision
         }
     }
 }

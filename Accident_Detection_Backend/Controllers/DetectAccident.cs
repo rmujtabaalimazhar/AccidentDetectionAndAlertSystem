@@ -20,6 +20,8 @@ namespace AccidentDetectionApi.Controllers
         private readonly AppDbContext db;
         private readonly PushNotificationService _pushService;
         private readonly CrashAnalysisEngine _crashEngine;
+        private readonly CrashFilterEngine _filterEngine;
+        private readonly BfsImpactEngine _bfsEngine;
         private readonly CrashScalingConfig _scalingConfig;
 
         // In-memory cache for live victim location updates (ultra-fast polling without database thrashing)
@@ -29,12 +31,79 @@ namespace AccidentDetectionApi.Controllers
             AppDbContext context,
             PushNotificationService pushService,
             CrashAnalysisEngine crashEngine,
+            CrashFilterEngine filterEngine,
+            BfsImpactEngine bfsEngine,
             CrashScalingConfig scalingConfig)
         {
             db = context;
             _pushService = pushService;
             _scalingConfig = scalingConfig ?? new CrashScalingConfig();
-            _crashEngine = crashEngine ?? new CrashAnalysisEngine(_scalingConfig);
+            _filterEngine = filterEngine ?? new CrashFilterEngine(_scalingConfig);
+            _bfsEngine = bfsEngine ?? new BfsImpactEngine(_scalingConfig);
+            _crashEngine = crashEngine ?? new CrashAnalysisEngine(_scalingConfig, _filterEngine);
+        }
+
+        [HttpPost("process-telemetry")]
+        public async Task<IActionResult> ProcessTelemetry([FromBody] TelemetryPayload payload)
+        {
+            if (payload == null)
+                return BadRequest(new { status = "ERROR", message = "Invalid telemetry payload" });
+
+            double gForce = Math.Sqrt(Math.Pow(payload.AccelX, 2) + Math.Pow(payload.AccelY, 2) + Math.Pow(payload.AccelZ, 2));
+            if (gForce >= 25.0) gForce /= 9.81;
+
+            // Fallback Check: Reject missing or non-sustained duration values (<35ms)
+            if (payload.ImpactDurationMs <= 0 || payload.ImpactDurationMs < _scalingConfig.MinimumImpactDurationMs)
+            {
+                return Ok(new
+                {
+                    status = "Ignored",
+                    reason = $"Event duration ({payload.ImpactDurationMs}ms) too short. Classified as AIS 0 tap/handling."
+                });
+            }
+
+            if (!_filterEngine.IsValidCrash(gForce, payload.ImpactDurationMs))
+            {
+                return Ok(new { status = "Ignored", reason = "Event below G-force threshold." });
+            }
+
+            Car? vehicle = null;
+            if (payload.CarId.HasValue && payload.CarId.Value > 0)
+            {
+                vehicle = await db.Cars.Include(c => c.Category).FirstOrDefaultAsync(c => c.Car_Id == payload.CarId.Value);
+            }
+            else if (!string.IsNullOrEmpty(payload.UserId))
+            {
+                vehicle = await db.Cars.Include(c => c.Category).FirstOrDefaultAsync(c => c.Uid == payload.UserId);
+            }
+
+            if (vehicle == null)
+            {
+                vehicle = await db.Cars.Include(c => c.Category).FirstOrDefaultAsync();
+                if (vehicle == null) return NotFound("Vehicle record not found.");
+            }
+
+            var category = vehicle.Category ?? await db.Categories.FirstOrDefaultAsync(c => c.Category_Id == vehicle.Category_Id);
+            double vehicleWeightKg = _crashEngine.ResolveVehicleMassKg(category, vehicle, new AccidentRequest { CarId = vehicle.Car_Id });
+
+            var nodeEntities = await db.Nodes.Where(n => n.Category_Id == vehicle.Category_Id).ToListAsync();
+            var nodeAbsorptionMap = nodeEntities.ToDictionary(n => n.Node_Id, n => (double)(n.Force ?? 0m));
+
+            double realWorldForceN = _scalingConfig.CalculateRealWorldForce(gForce, vehicleWeightKg);
+            double cabinTransmittedForceN = _bfsEngine.PropagateForceToCabin(realWorldForceN, nodeAbsorptionMap, payload.ImpactNode);
+            string aisScore = _bfsEngine.CalculateAisScore(cabinTransmittedForceN);
+
+            return Ok(new
+            {
+                status = "Accident Detected",
+                vehicleModel = vehicle.Make ?? "Vehicle",
+                category = category?.Name ?? "Sedan",
+                registeredWeightKg = vehicleWeightKg,
+                measuredGForce = Math.Round(gForce, 2),
+                scaledRealImpactForcekN = Math.Round(realWorldForceN / 1000.0, 2),
+                transmittedCabinForcekN = Math.Round(cabinTransmittedForceN / 1000.0, 2),
+                injurySeverity = aisScore
+            });
         }
 
         [HttpPost("ImpactCalculation")]
