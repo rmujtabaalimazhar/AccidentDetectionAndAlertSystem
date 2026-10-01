@@ -18,7 +18,7 @@ class NotificationManager: NSObject, ObservableObject, UNUserNotificationCenterD
     private var lastSeenAlertId: Int {
         get { UserDefaults.standard.integer(forKey: "lastSeenAlertId") }
         set { UserDefaults.standard.set(newValue, forKey: "lastSeenAlertId") }
-    }
+    } 
     
     var currentUserRole: String? {
         UserDefaults.standard.string(forKey: "savedUserRole")
