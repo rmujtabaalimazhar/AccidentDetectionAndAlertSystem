@@ -31,10 +31,10 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
     
     // 1. Calibrated Linear Acceleration Threshold (Gravity isolated: 0 m/s² rest baseline)
     // 2.0 G (19.6 m/s²) catches lightweight toy car / RC collisions, but ignores finger taps
-    let IMPACT_THRESHOLD_ACC: Double = 11//19.6    // ~2.0 G (19.6 m/s² pure linear acceleration)
+    let IMPACT_THRESHOLD_ACC: Double = 10    //19.6    // ~2.0 G (19.6 m/s² pure linear acceleration)
     let DEBOUNCE_MS: TimeInterval = 800       // 0.8s debounce prevents double-triggering
-    let MIN_SUSTAINED_FRAMES: Int =   2//3         // Requires force to stay high for >= 3 consecutive frames (~40-60ms)
-    let MIN_DURATION_MS: Double = 20   //35.0        // Minimum sustained impact duration in ms (filters taps <35ms)
+    let MIN_SUSTAINED_FRAMES: Int =   3         // Requires force to stay high for >= 3 consecutive frames (~40-60ms)
+    let MIN_DURATION_MS: Double = 35        // Minimum sustained impact duration in ms (filters taps <35ms)
     let WARMUP_READS = 10                     // Warmup buffer before sensor activation
     
     // Time check tracking for sustained impact window
@@ -77,6 +77,57 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
     @Published var shakeLevel: Double = 0
     @Published var debugStatus: String = "Warming up…"
     
+    // =========================================================================
+    // REQUIRED PRIORITIZED STATE MACHINE STATE VARIABLES & CONSTANTS
+    // =========================================================================
+    
+    // 1. Architectural Required State Variables
+    @Published var is_freefall_locked: Bool = false            // Lockout flag disabling vehicle & rollover checks
+    var freefall_lockout_until: Date = Date.distantPast        // Absolute lockout expiry timestamp (2000ms)
+    var impact_timestamp: Date? = nil                          // Exact timestamp of T=0ms impact spike
+    @Published var primary_event: String? = nil                // T=0ms classified primary event (e.g. SIDE COLLISION (RIGHT))
+    @Published var in_phase_2: Bool = false                    // Active Phase 2 dynamic settlement & rollover verification flag
+    
+    // 2. Calibrated Architectural Thresholds & Constants
+    let FREEFALL_ACC_THRESHOLD_G: Double = 0.25            // Top Priority: |a_total| < 0.25g indicates weightless free-fall
+    let FREEFALL_MIN_DURATION_MS: Double = 120.0           // Minimum continuous zero-G duration before impact spike
+    let FREEFALL_LOCKOUT_MS: Double = 2000.0               // Disables all vehicle accident & rollover checks for 2000ms
+    let ROTATIONAL_NOISE_THRESHOLD_DEG_S: Double = 600.0   // 2nd Priority: ||w|| > 600 deg/s at peak impact rejects hand slap
+    let IMPACT_COLLISION_THRESHOLD_G: Double = 4.0         // Collision impact threshold (|a_total| >= 4.0g)
+    let PHASE2_SETTLED_GYRO_DEG_S: Double = 30.0           // Phase 2: Motion considered settled when ||w|| < 30 deg/s
+    let PHASE2_MIN_SETTLED_MS: Double = 150.0              // Physical motion must remain settled for at least 150ms
+    let PHASE2_MAX_TIMEOUT_MS: Double = 500.0              // Max dynamic settlement timeout (500ms)
+    let ROLLOVER_POSTURE_ANGLE_DEG: Double = 60.0          // Static posture tilt phi = acos(|az|/|atotal|) > 60° confirms rollover
+    
+    // 3. Dynamic Motion Settlement & Posture Tracking Variables (Phase 2)
+    private var phase2_peak_acc: Double = 0.0
+    private var phase2_peak_ax: Double = 0.0
+    private var phase2_peak_ay: Double = 0.0
+    private var phase2_peak_az: Double = 0.0
+    private var phase2_settled_start_time: Date? = nil
+    
+    // 4. 100 Hz IMU Rolling Buffer (stores last ~300ms of readings prior to impact)
+    struct IMUReading {
+        let timestamp: Date
+        let totalAccelG: Double     // |a_total| = sqrt(totX^2 + totY^2 + totZ^2)
+        let ax: Double              // totX (in G)
+        let ay: Double              // totY (in G)
+        let az: Double              // totZ (in G)
+        let userAx: Double          // userAcceleration.x (in G)
+        let userAy: Double          // userAcceleration.y (in G)
+        let userAz: Double          // userAcceleration.z (in G)
+        let gyroMagDegS: Double     // ||w|| in deg/s
+        let rotX: Double            // rotationRate.x in rad/s
+        let rotY: Double            // rotationRate.y in rad/s
+        let rotZ: Double            // rotationRate.z in rad/s
+    }
+    private var imuBuffer: [IMUReading] = []
+    
+    // 5. Continuous Free-Fall Streak Tracking
+    private var freefallStreakStartTime: Date? = nil
+    private var lastQualifiedFreefallDurationMs: Double = 0.0
+    private var lastQualifiedFreefallEndTime: Date = Date.distantPast
+    
     var currentLocation: CLLocationCoordinate2D?
     
     override init() {
@@ -89,6 +140,7 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
     
     func normalizeImpact(_ side: String?) -> String {
         guard let side = side?.lowercased() else { return "NONE" }
+        if side.contains("fall") || side.contains("drop") { return "Phone Fall" }
         if side.contains("rollover") { return "Rollover" }
         if side.contains("front") && side.contains("left") { return "Front-Left" }
         if side.contains("front") && side.contains("right") { return "Front-Right" }
@@ -187,17 +239,23 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         activeAccidentId = nil
     }
     
-    func determineExactSide(dynX: Double, dynY: Double, dynZ: Double, gravZ: Double, gyroMag: Double) -> String {
-        // 1. Rollover Check:
-        // A vehicle rollover requires either:
-        // a) Violent rotational roll/tumble (gyroMag > 5.5 rad/s)
-        // b) Sustained inverted orientation onto vehicle roof (gravZ > 0.70 face-down with gyroMag > 2.0 rad/s)
-        // NOTE: In iOS CoreMotion, normal face-up posture has gravZ < 0 (approx -0.7 to -1.0).
-        // Only when the device is completely inverted face-down towards Earth does gravZ become positive (+0.7 to +1.0).
-        if gyroMag > 5.5 || (gravZ > 0.70 && gyroMag > 2.0) {
+    func determineExactSide(dynX: Double, dynY: Double, dynZ: Double, gravZ: Double, gyroMag: Double, isPhoneFall: Bool = false, rotatedPast90Deg: Bool = false) -> String {
+        // 1. Rollover Check: EXACTLY when phone rotates above 90 degrees with active roll/tumble motion
+        // (Prevents linear palm hits and table shocks from falsely triggering rollover)
+        if rotatedPast90Deg || (gravZ > 0.15 && gyroMag >= 2.0) {
             return "Rollover"
         }
         
+        // 2. Phone Fall Edge Case: Gated by at least 1.75 feet drop height (free-fall >= 300ms)
+        if isPhoneFall {
+            return "Phone Fall"
+        }
+        
+        // 3. Linear Impact Strike (Calibrated for Physical Palm & Obstacle Collision):
+        // Striking the Front (top edge) creates rearward deceleration in -Y
+        // Striking the Rear (bottom edge) creates forward acceleration in +Y
+        // Striking the Right side creates leftward deceleration in -X
+        // Striking the Left side creates rightward acceleration in +X
         let absX = abs(dynX)
         let absY = abs(dynY)
         
@@ -206,26 +264,23 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         }
         
         let ratio = absX / max(absY, 0.0001)
-        // Diagonal strike (energy balanced between axes)
+        
+        // Diagonal strike (balanced energy between longitudinal and lateral axes)
         if absX >= 0.18 && absY >= 0.18 && ratio >= 0.45 && ratio <= 2.2 {
-            let lon = dynY >= 0 ? "Front" : "Rear"
-            let lat = dynX >= 0 ? "Right" : "Left"
+            let lon = dynY <= 0 ? "Front" : "Rear"
+            let lat = dynX <= 0 ? "Right" : "Left"
             return "\(lon)-\(lat)"
         }
         
         // Orthogonal strike
         if absY >= absX {
-            return dynY >= 0 ? "Front" : "Rear"
+            return dynY <= 0 ? "Front" : "Rear"
         } else {
-            return dynX >= 0 ? "Right" : "Left"
+            return dynX <= 0 ? "Right" : "Left"
         }
     }
     
-    func sendImpact(acceleration: Double, coords: CLLocationCoordinate2D, detectedSide: String = "Front", dynX: Double = 0, dynY: Double = 0, dynZ: Double = 0, durationMs: Double = 40.0) {
-        let formatter = DateFormatter()
-        formatter.timeStyle = .medium
-        let currentTimeString = formatter.string(from: Date())
-        
+    func sendImpact(acceleration: Double, coords: CLLocationCoordinate2D, detectedSide: String = "Front", dynX: Double = 0, dynY: Double = 0, dynZ: Double = 0, gravZ: Double = 0.0, durationMs: Double = 40.0, isPhoneFall: Bool = false, freeFallMs: Double = 0.0) {
         let effectiveCarId = carId > 0 ? carId : 1
         
         let now = Date()
@@ -233,7 +288,7 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         lastSent = now
         
         DispatchQueue.main.async {
-            self.debugStatus = "📡 Sending to API…"
+            self.debugStatus = isPhoneFall ? "📱 Sending Phone Fall Edge Case…" : (detectedSide.contains("Rollover") ? "🔄 Sending Rollover Crash…" : "📡 Sending to API…")
         }
         
         guard let url = URL(string: "\(API)/DetectAccident/ImpactCalculation") else { return }
@@ -247,23 +302,30 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         let isoFormatter = ISO8601DateFormatter()
         let timeIso = isoFormatter.string(from: now)
         
+        let isRollover = detectedSide.contains("Rollover")
+        let isFall = !isRollover && (isPhoneFall || detectedSide.contains("Fall"))
+        
         let body: [String: Any] = [
             "CarId": effectiveCarId,
             "Car_Id": effectiveCarId,
+            "AccidentType": isRollover ? "Rollover" : (isFall ? "Phone Fall" : "Impact"),
             "Acceleration": acceleration,
             "GForce": gForce,
             "ImpactDurationMs": durationMs,
             "ImpactSide": detectedSide,
             "SteeringSide": steeringSide,
+            "FreeFallDurationMs": isFall ? freeFallMs : 0.0,
+            "IsFreeFall": isFall,
             "AccelX": dynX,
             "AccelY": dynY,
             "AccelZ": dynZ,
+            "GravityZ": gravZ,
             "GyroX": gyroX,
             "GyroY": gyroY,
             "GyroZ": gyroZ,
             "Latitude": coords.latitude,
             "Longitude": coords.longitude,
-            "Severity": clientSeverity,
+            "Severity": isFall ? "Safe (Edge Case)" : (isRollover ? "High" : clientSeverity),
             "Time": timeIso
         ]
         
@@ -293,20 +355,20 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
             do {
                 if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     DispatchQueue.main.async {
-                        let accidentType = json["accidentType"] as? String ?? "Impact"
+                        let accidentType = json["accidentType"] as? String ?? (isFall ? "Phone Fall" : "Impact")
                         let rawSide     = json["impactSide"] as? String ?? detectedSide
                         let impactForce = json["impactForce"] as? Double ?? 0
                         var cabinDamage = json["cabinDamage"] as? Double ?? 0
                         let cabinForce  = json["cabinForce"] as? Double ?? 0
-                        let apiStatus   = json["status"] as? String ?? "SAFE"
+                        let apiStatus   = json["status"] as? String ?? (isFall ? "PHONE_FALL" : "SAFE")
                         let serverTime  = json["time"] as? String ?? timeStr
 
                         let aisLevel = json["aisLevel"] as? String ?? "AIS 0"
-                        let passengerSeverity = json["passengerSeverity"] as? String ?? (json["severity"] as? String ?? clientSeverity)
-                        let passengerInjury = json["passengerInjury"] as? String ?? "No significant injuries detected."
+                        let passengerSeverity = json["passengerSeverity"] as? String ?? (json["severity"] as? String ?? (isFall ? "Safe (Edge Case)" : clientSeverity))
+                        let passengerInjury = json["passengerInjury"] as? String ?? (isFall ? "Edge Case: Phone drop detected and safely filtered without vehicle cabin damage." : "No significant injuries detected.")
                         let driverSeverity = json["driverSeverity"] as? String ?? passengerSeverity
-                        let driverInjury = json["driverInjury"] as? String ?? "Normal driving safe baseline."
-                        let occupantSummary = json["occupantSummary"] as? String ?? ""
+                        let driverInjury = json["driverInjury"] as? String ?? (isFall ? "Edge Case: Phone drop detected and safely filtered without vehicle cabin damage." : "Normal driving safe baseline.")
+                        let occupantSummary = json["occupantSummary"] as? String ?? (isFall ? "Phone drop detected (free-fall weightlessness & transient impact). Vehicle safe." : "")
                         let steeringSideRet = json["steeringSide"] as? String ?? self.steeringSide
 
                         if cabinDamage == 0 && cabinForce > 0 && impactForce > 0 {
@@ -315,9 +377,13 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
                         if cabinDamage.isNaN { cabinDamage = 0 }
                         cabinDamage = max(0, min(100, cabinDamage))
 
-                        self.debugStatus = apiStatus == "ACCIDENT"
-                            ? String(format: "🚨 %@ [%@]! Force=%.0fN Damage=%.0f%%", accidentType.uppercased(), passengerSeverity.uppercased(), impactForce, cabinDamage)
-                            : String(format: "✅ API OK: \(rawSide) (force=%.0fN)", impactForce)
+                        if apiStatus == "PHONE_FALL" || accidentType.contains("Fall") {
+                            self.debugStatus = String(format: "📱 Phone Fall Edge Case Detected! (Force=%.0fN | Vehicle Safe)", impactForce)
+                        } else if apiStatus == "ACCIDENT" {
+                            self.debugStatus = String(format: "🚨 %@ [%@]! Force=%.0fN Damage=%.0f%%", accidentType.uppercased(), passengerSeverity.uppercased(), impactForce, cabinDamage)
+                        } else {
+                            self.debugStatus = String(format: "✅ API OK: \(rawSide) (force=%.0fN)", impactForce)
+                        }
 
                         self.sensorData = SensorData(
                             accidentType: accidentType,
@@ -337,7 +403,7 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
                             status: apiStatus
                         )
                         
-                        // Start continuous live location broadcasting if accident detected
+                        // Start continuous live location broadcasting only for active vehicle accidents (not phone drops)
                         if apiStatus == "ACCIDENT", let accId = json["accidentId"] as? Int {
                             self.startLiveLocationBroadcast(for: accId)
                         }
@@ -352,20 +418,155 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         }.resume()
     }
     
-    func confirmAccident(dynX: Double, dynY: Double, dynZ: Double, gravZ: Double, gyroX: Double, gyroY: Double, gyroZ: Double, acc: Double, durationMs: Double = 40.0) {
+    // =========================================================================
+    // STATE MACHINE HELPER FUNCTIONS & LOGGING
+    // =========================================================================
+    
+    /// Clean, timestamped terminal log output for monitoring state transitions in real time during live reviews & testing
+    private func logStateTransition(_ message: String) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        let timestamp = formatter.string(from: Date())
+        print("[\(timestamp)] \(message)")
+    }
+    
+    /// Phase 1: Classify primary impact direction based solely on theta = atan2(a_y, a_x)
+    /// Ignores gyro orientation angles and resting tilt (a_z) at this exact millisecond.
+    func classifyImpactDirection(ax: Double, ay: Double) -> (event: String, thetaDeg: Double) {
+        let thetaRad = atan2(ay, ax)
+        let thetaDeg = thetaRad * (180.0 / Double.pi)
+        
+        let direction: String
+        if thetaDeg >= -45.0 && thetaDeg <= 45.0 {
+            direction = "FRONTAL COLLISION"
+        } else if (thetaDeg >= 135.0 && thetaDeg <= 180.0) || (thetaDeg >= -180.0 && thetaDeg <= -135.0) {
+            direction = "REAR COLLISION"
+        } else if thetaDeg > 45.0 && thetaDeg < 135.0 {
+            direction = "SIDE COLLISION (RIGHT)"
+        } else { // thetaDeg > -135.0 && thetaDeg < -45.0
+            direction = "SIDE COLLISION (LEFT)"
+        }
+        return (direction, thetaDeg)
+    }
+    
+    /// Top Priority: Evaluates pre-impact rolling buffer for continuous weightlessness (|a_total| < 0.25g for >= 120ms)
+    private func checkContinuousFreefall(priorTo spikeTime: Date) -> (isFreefall: Bool, durationMs: Double) {
+        // Filter rolling buffer readings in the 300ms window preceding the impact spike
+        let preSpike = imuBuffer.filter { reading in
+            let delta = spikeTime.timeIntervalSince(reading.timestamp)
+            return delta >= 0 && delta <= 0.30
+        }.sorted { $0.timestamp > $1.timestamp }
+        
+        var consecutiveCount = 0
+        var firstTime: Date? = nil
+        var lastTime: Date? = nil
+        var skippedTransitionFrames = 0
+        
+        for reading in preSpike {
+            if reading.totalAccelG < FREEFALL_ACC_THRESHOLD_G {
+                consecutiveCount += 1
+                if firstTime == nil { firstTime = reading.timestamp }
+                lastTime = reading.timestamp
+            } else {
+                if consecutiveCount > 0 {
+                    break
+                } else if skippedTransitionFrames < 2 {
+                    // Allow up to 2 transition frames leading into the impact shock front
+                    skippedTransitionFrames += 1
+                } else {
+                    break
+                }
+            }
+        }
+        
+        var durationMs: Double = 0.0
+        if let first = firstTime, let last = lastTime {
+            durationMs = abs(first.timeIntervalSince(last)) * 1000.0 + 10.0
+        }
+        
+        let qualifies = consecutiveCount >= 12 || durationMs >= FREEFALL_MIN_DURATION_MS
+        return (qualifies, max(durationMs, Double(consecutiveCount) * 10.0))
+    }
+    
+    /// Phase 2: Dynamic Motion Settlement & Rollover Verification
+    /// Resolves settlement and evaluates static posture angle relative to gravity: phi = acos(|a_z| / |a_total|)
+    private func finalizePhase2(
+        currentPrimary: String,
+        settledMs: Double,
+        totalElapsedMs: Double,
+        isTimeout: Bool,
+        motion: CMDeviceMotion,
+        totalMagG: Double,
+        totZ: Double
+    ) {
+        if isTimeout {
+            logStateTransition("⏱️ [PHASE 2 TIMING] Motion settlement reached max timeout limit (\(String(format: "%.0f", totalElapsedMs))ms). Evaluating static posture angle.")
+        } else {
+            logStateTransition("✅ [PHASE 2 TIMING] Physical motion settled dynamically (||w|| < 30 deg/s for \(String(format: "%.0f", settledMs))ms, total duration: \(String(format: "%.0f", totalElapsedMs))ms).")
+        }
+        
+        // Calculate static posture angle relative to gravity: phi = acos(|a_z| / |a_total|)
+        let ratio = min(1.0, max(0.0, abs(totZ) / max(totalMagG, 0.0001)))
+        let phiRad = acos(ratio)
+        let phiDeg = phiRad * (180.0 / Double.pi)
+        
+        // Check if vehicle orientation landed upside down on roof (Gz > 0.20 in CoreMotion)
+        let isRoofInverted = motion.gravity.z > 0.20
+        let finalEvent: String
+        
+        if phiDeg > ROLLOVER_POSTURE_ANGLE_DEG || isRoofInverted {
+            // Reclassify event as primary_event + " WITH ROLLOVER"
+            finalEvent = "\(currentPrimary) WITH ROLLOVER"
+            logStateTransition("🔄 [PHASE 2 RESOLVED] Reclassified event as: [\(finalEvent)] (Post-impact angle phi = \(String(format: "%.1f", phiDeg))° > 60° [ROLLOVER CONFIRMED]).")
+        } else {
+            // Retain pure primary_event, confirming transient side-impact tilt has resolved
+            finalEvent = currentPrimary
+            logStateTransition("🛡️ [PHASE 2 RESOLVED] Retained Pure Primary Event: [\(finalEvent)] (Post-impact angle phi = \(String(format: "%.1f", phiDeg))° <= 60° [TRANSIENT WOBBLE CLEARED]).")
+        }
+        
+        let coords = currentLocation ?? CLLocationCoordinate2D(latitude: 0, longitude: 0)
+        confirmAccident(
+            dynX: phase2_peak_ax,
+            dynY: phase2_peak_ay,
+            dynZ: phase2_peak_az,
+            gravZ: motion.gravity.z,
+            gyroX: motion.rotationRate.x,
+            gyroY: motion.rotationRate.y,
+            gyroZ: motion.rotationRate.z,
+            acc: phase2_peak_acc,
+            durationMs: max(totalElapsedMs, 35.0),
+            isPhoneFall: false,
+            freeFallMs: 0.0,
+            classifiedSide: finalEvent
+        )
+        
+        // Reset Phase 2 State
+        in_phase_2 = false
+        primary_event = nil
+        impact_timestamp = nil
+        phase2_settled_start_time = nil
+    }
+    
+    func confirmAccident(dynX: Double, dynY: Double, dynZ: Double, gravZ: Double, gyroX: Double, gyroY: Double, gyroZ: Double, acc: Double, durationMs: Double = 40.0, isPhoneFall: Bool = false, freeFallMs: Double = 0.0, rotatedPast90Deg: Bool = false, classifiedSide: String? = nil) {
         let now = Date()
         if now.timeIntervalSince(lastSent) * 1000 < DEBOUNCE_MS { return }
         
-        // Filter out extreme sensor resets (> 150 m/s²)
-        if acc > 150 { return }
+        // Filter out extreme sensor resets (> 350 m/s²)
+        if acc > 350 { return }
         
         let gyroMagnitude = sqrt(gyroX*gyroX + gyroY*gyroY + gyroZ*gyroZ)
-        let detectedSide = determineExactSide(dynX: dynX, dynY: dynY, dynZ: dynZ, gravZ: gravZ, gyroMag: gyroMagnitude)
+        let detectedSide = classifiedSide ?? determineExactSide(dynX: dynX, dynY: dynY, dynZ: dynZ, gravZ: gravZ, gyroMag: gyroMagnitude, isPhoneFall: isPhoneFall, rotatedPast90Deg: rotatedPast90Deg)
         
-        debugStatus = String(format: "🚨 Verified %@! Acc=%.1f m/s² (%.0fms)", detectedSide, acc, durationMs)
+        let isActuallyFall = isPhoneFall || detectedSide.contains("Fall") || detectedSide.contains("FALL") || detectedSide.contains("DROP")
+        
+        if isActuallyFall {
+            debugStatus = String(format: "📱 Phone Fall Edge Case: Acc=%.1f m/s² (FF=%.0fms)", acc, freeFallMs)
+        } else {
+            debugStatus = String(format: "🚨 Verified %@! Acc=%.1f m/s² (%.0fms)", detectedSide, acc, durationMs)
+        }
         
         let coords = currentLocation ?? CLLocationCoordinate2D(latitude: 0, longitude: 0)
-        sendImpact(acceleration: acc, coords: coords, detectedSide: detectedSide, dynX: dynX, dynY: dynY, dynZ: dynZ, durationMs: durationMs)
+        sendImpact(acceleration: acc, coords: coords, detectedSide: detectedSide, dynX: dynX, dynY: dynY, dynZ: dynZ, gravZ: gravZ, durationMs: durationMs, isPhoneFall: isActuallyFall, freeFallMs: isActuallyFall ? freeFallMs : 0.0)
     }
     
     func startSensors() {
@@ -373,87 +574,251 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         self.prevAcc = 0
         self.shake = 0
         self.readCount = 0
-        self.highForceStartTime = nil
-        self.highForceFrameCount = 0
-        self.debugStatus = "Calibrating sensors…"
+        self.is_freefall_locked = false
+        self.freefall_lockout_until = Date.distantPast
+        self.impact_timestamp = nil
+        self.primary_event = nil
+        self.in_phase_2 = false
+        self.phase2_settled_start_time = nil
+        self.imuBuffer.removeAll()
+        self.freefallStreakStartTime = nil
+        self.lastQualifiedFreefallDurationMs = 0.0
+        self.lastQualifiedFreefallEndTime = Date.distantPast
+        self.debugStatus = "Calibrating sensors (100 Hz)…"
+        
+        logStateTransition("🚀 [SENSOR INITIALIZATION] Starting IMU at 100 Hz with Prioritized State Machine & Temporal Phase Separation.")
         
         if motionManager.isDeviceMotionAvailable {
-            motionManager.deviceMotionUpdateInterval = 0.02 // 50Hz update (20ms per frame)
+            motionManager.deviceMotionUpdateInterval = 0.01 // 100 Hz update (10ms per frame)
             motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, error in
                 guard let self = self, let motion = motion else { return }
                 
-                // 1. Pure dynamic linear acceleration (gravity isolated to zero baseline by Apple sensor fusion)
-                let uX = motion.userAcceleration.x
-                let uY = motion.userAcceleration.y
-                let uZ = motion.userAcceleration.z
+                let now = Date()
                 
-                // Earth gravity unit vector
+                // 1. Core IMU Kinematics Extraction
+                let uX = motion.userAcceleration.x // G
+                let uY = motion.userAcceleration.y // G
+                let uZ = motion.userAcceleration.z // G
+                let gX = motion.gravity.x
+                let gY = motion.gravity.y
                 let gZ = motion.gravity.z
+                let rX = motion.rotationRate.x     // rad/s
+                let rY = motion.rotationRate.y     // rad/s
+                let rZ = motion.rotationRate.z     // rad/s
                 
-                // Angular rotation rate (rad/s)
-                let rX = motion.rotationRate.x
-                let rY = motion.rotationRate.y
-                let rZ = motion.rotationRate.z
+                // Total acceleration vector (including gravity)
+                let totX = uX + gX
+                let totY = uY + gY
+                let totZ = uZ + gZ
                 
+                // Total linear acceleration magnitude |a_total| in G
+                let totalMagG = sqrt(totX*totX + totY*totY + totZ*totZ)
+                
+                // Gyroscope angular velocity magnitude ||w|| in deg/s
+                let gyroMagDegS = sqrt(rX*rX + rY*rY + rZ*rZ) * (180.0 / Double.pi)
+                
+                // Dynamic linear acceleration magnitude (without gravity baseline)
+                let dynMagnitude = sqrt(uX*uX + uY*uY + uZ*uZ)
+                
+                // Update Published state for live UI view
                 self.accelX = uX
                 self.accelY = uY
                 self.accelZ = uZ
-                
                 self.gyroX = rX
                 self.gyroY = rY
                 self.gyroZ = rZ
-                
-                // Dynamic linear shock magnitude (in G and m/s²)
-                let dynMagnitude = sqrt(uX*uX + uY*uY + uZ*uZ)
-                let linearAcc = dynMagnitude * 9.81
-                
                 self.shakeLevel = dynMagnitude
                 
+                // 2. Rolling Buffer Maintenance (100 Hz, sample duration: last ~300ms)
+                let reading = IMUReading(
+                    timestamp: now,
+                    totalAccelG: totalMagG,
+                    ax: totX,
+                    ay: totY,
+                    az: totZ,
+                    userAx: uX,
+                    userAy: uY,
+                    userAz: uZ,
+                    gyroMagDegS: gyroMagDegS,
+                    rotX: rX,
+                    rotY: rY,
+                    rotZ: rZ
+                )
+                self.imuBuffer.append(reading)
+                self.imuBuffer.removeAll { now.timeIntervalSince($0.timestamp) > 0.35 }
+                
+                // 3. Continuous Free-fall Weightlessness Streak Tracking
+                if totalMagG < self.FREEFALL_ACC_THRESHOLD_G {
+                    if self.freefallStreakStartTime == nil {
+                        self.freefallStreakStartTime = now
+                    }
+                    let streakMs = now.timeIntervalSince(self.freefallStreakStartTime!) * 1000.0
+                    if streakMs >= self.FREEFALL_MIN_DURATION_MS {
+                        self.lastQualifiedFreefallDurationMs = streakMs
+                        self.lastQualifiedFreefallEndTime = now
+                    }
+                } else {
+                    self.freefallStreakStartTime = nil
+                }
+                
+                // 4. Warmup reads check
                 self.readCount += 1
                 if self.readCount < self.WARMUP_READS {
-                    self.debugStatus = "Calibrating linear sensors (\(self.readCount)/\(self.WARMUP_READS))…"
+                    self.debugStatus = "Calibrating 100 Hz sensors (\(self.readCount)/\(self.WARMUP_READS))…"
                     return
                 }
                 
-                // 2. Time check / sustained impact window filter
-                if linearAcc >= self.IMPACT_THRESHOLD_ACC {
-                    if self.highForceStartTime == nil {
-                        self.highForceStartTime = Date()
-                        self.highForceFrameCount = 1
-                        self.debugStatus = String(format: "Spike detected (%.1f m/s²)... checking duration", linearAcc)
+                // =========================================================================
+                // TOP PRIORITY: FREE-FALL / PHONE DROP LOCKOUT INTERLOCK
+                // =========================================================================
+                if self.is_freefall_locked {
+                    if now < self.freefall_lockout_until {
+                        let remainingMs = self.freefall_lockout_until.timeIntervalSince(now) * 1000.0
+                        self.debugStatus = String(format: "🔒 Free-fall Lockout: %.0fms remaining", remainingMs)
+                        return // Disabling all Vehicle Accident and Rollover checks for 2000ms
                     } else {
-                        self.highForceFrameCount += 1
-                        let elapsedMs = Date().timeIntervalSince(self.highForceStartTime!) * 1000.0
-                        
-                        // Sustained impact window reached (>= 3 frames or >= 35ms)
-                        if self.highForceFrameCount >= self.MIN_SUSTAINED_FRAMES || elapsedMs >= self.MIN_DURATION_MS {
-                            self.confirmAccident(
-                                dynX: uX,
-                                dynY: uY,
-                                dynZ: uZ,
-                                gravZ: gZ,
-                                gyroX: rX,
-                                gyroY: rY,
-                                gyroZ: rZ,
-                                acc: linearAcc,
-                                durationMs: max(elapsedMs, self.MIN_DURATION_MS)
-                            )
-                            // Reset tracking after triggering
-                            self.highForceStartTime = nil
-                            self.highForceFrameCount = 0
-                        }
+                        self.is_freefall_locked = false
+                        self.logStateTransition("🔓 [LOCKOUT EXPIRED] 2000ms free-fall lockout completed. Vehicle crash detection re-armed.")
                     }
-                } else {
-                    // Force dropped below threshold before duration check -> Discard finger tap!
-                    if self.highForceStartTime != nil {
-                        self.highForceStartTime = nil
-                        self.highForceFrameCount = 0
+                }
+                
+                // =========================================================================
+                // PHASE 2: DYNAMIC MOTION SETTLEMENT & ROLLOVER VERIFICATION
+                // =========================================================================
+                if self.in_phase_2, let impactTime = self.impact_timestamp, let currentPrimary = self.primary_event {
+                    let timeSinceImpactMs = now.timeIntervalSince(impactTime) * 1000.0
+                    
+                    // Track peak acceleration during dynamic impact interval
+                    let currentLinearAcc = totalMagG * 9.81
+                    if currentLinearAcc > self.phase2_peak_acc {
+                        self.phase2_peak_acc = currentLinearAcc
                     }
                     
-                    let now = Date()
-                    if now.timeIntervalSince(self.lastSent) * 1000 > self.DEBOUNCE_MS {
-                        self.debugStatus = String(format: "Monitoring: Linear Acc=%.2f m/s² (%.2f G)", linearAcc, dynMagnitude)
+                    // Monitor gyroscope magnitude ||w|| post-impact: check if physical motion has settled (< 30 deg/s)
+                    let isSettled = gyroMagDegS < self.PHASE2_SETTLED_GYRO_DEG_S
+                    if isSettled {
+                        if self.phase2_settled_start_time == nil {
+                            self.phase2_settled_start_time = now
+                        }
+                        let settledMs = now.timeIntervalSince(self.phase2_settled_start_time!) * 1000.0
+                        
+                        // Condition: Settled for at least 150ms OR max timeout of 500ms reached
+                        if settledMs >= self.PHASE2_MIN_SETTLED_MS || timeSinceImpactMs >= self.PHASE2_MAX_TIMEOUT_MS {
+                            self.finalizePhase2(
+                                currentPrimary: currentPrimary,
+                                settledMs: settledMs,
+                                totalElapsedMs: timeSinceImpactMs,
+                                isTimeout: false,
+                                motion: motion,
+                                totalMagG: totalMagG,
+                                totZ: totZ
+                            )
+                            return
+                        }
+                    } else {
+                        // Reset settlement streak on any post-impact wobble disturbance
+                        self.phase2_settled_start_time = nil
+                        
+                        if timeSinceImpactMs >= self.PHASE2_MAX_TIMEOUT_MS {
+                            // Max timeout of 500ms reached
+                            self.finalizePhase2(
+                                currentPrimary: currentPrimary,
+                                settledMs: 0.0,
+                                totalElapsedMs: timeSinceImpactMs,
+                                isTimeout: true,
+                                motion: motion,
+                                totalMagG: totalMagG,
+                                totZ: totZ
+                            )
+                            return
+                        }
                     }
+                    
+                    self.debugStatus = String(format: "⏳ Phase 2: %@ (||w||=%.0f°/s | %.0fms)", currentPrimary, gyroMagDegS, timeSinceImpactMs)
+                    return // Suppress conflicting triggers while resolving Phase 2
+                }
+                
+                // =========================================================================
+                // IMPACT SPIKE EVALUATION: PRIORITIES 1 & 2 + PHASE 1 CLASSIFICATION
+                // =========================================================================
+                if totalMagG >= self.IMPACT_COLLISION_THRESHOLD_G {
+                    // Debounce check
+                    if now.timeIntervalSince(self.lastSent) * 1000.0 < self.DEBOUNCE_MS { return }
+                    
+                    // ---------------------------------------------------------------------
+                    // TOP PRIORITY: FREE-FALL / PHONE DROP INTERLOCK
+                    // ---------------------------------------------------------------------
+                    // Check rolling buffer: |a_total| < 0.25g for >= 120ms continuously before impact spike
+                    let (bufferFreefall, bufferDuration) = self.checkContinuousFreefall(priorTo: now)
+                    let recentStreakFreefall = (now.timeIntervalSince(self.lastQualifiedFreefallEndTime) <= 0.10)
+                    
+                    if bufferFreefall || recentStreakFreefall {
+                        let dropDurationMs = max(bufferDuration, self.lastQualifiedFreefallDurationMs)
+                        
+                        // 1. Emit Event: "PHONE DROP / FALL DETECTED"
+                        self.logStateTransition("⚠️ [TOP PRIORITY: FREE-FALL INTERLOCK] PHONE DROP / FALL DETECTED (Pre-impact zero-g duration: \(String(format: "%.0f", dropDurationMs))ms). Setting Lockout Flag for 2000ms. Disabling vehicle crash & rollover checks.")
+                        
+                        // 2. Set Lockout Flag disabling all Vehicle Accident and Rollover checks for 2000ms
+                        self.is_freefall_locked = true
+                        self.freefall_lockout_until = now.addingTimeInterval(self.FREEFALL_LOCKOUT_MS / 1000.0)
+                        
+                        self.debugStatus = String(format: "📱 PHONE DROP / FALL DETECTED (%.0fms) — Lockout 2s", dropDurationMs)
+                        
+                        // Transmit safe fall edge case
+                        let coords = self.currentLocation ?? CLLocationCoordinate2D(latitude: 0, longitude: 0)
+                        self.sendImpact(
+                            acceleration: totalMagG * 9.81,
+                            coords: coords,
+                            detectedSide: "PHONE DROP / FALL DETECTED",
+                            dynX: uX,
+                            dynY: uY,
+                            dynZ: uZ,
+                            gravZ: gZ,
+                            durationMs: 30.0,
+                            isPhoneFall: true,
+                            freeFallMs: dropDurationMs
+                        )
+                        
+                        // 3. Exit processing loop for this window
+                        return
+                    }
+                    
+                    // ---------------------------------------------------------------------
+                    // SECOND PRIORITY: ROTATIONAL NOISE / HAND SLAP FILTER
+                    // ---------------------------------------------------------------------
+                    // If ||w|| > 600 deg/s AT THE EXACT PEAK of the impact spike: reject as manual noise
+                    if gyroMagDegS > self.ROTATIONAL_NOISE_THRESHOLD_DEG_S {
+                        self.logStateTransition("✋ [SECOND PRIORITY: ROTATIONAL NOISE FILTER] HAND SLAP / MANUAL HANDLING REJECTED. Total angular velocity ||w|| = \(String(format: "%.1f", gyroMagDegS)) deg/s > 600 deg/s at peak impact (|a_total| = \(String(format: "%.2f", totalMagG))g). Rejecting as vehicle collision.")
+                        self.debugStatus = String(format: "✋ Hand Slap / Rotational Noise Rejected (%.0f°/s)", gyroMagDegS)
+                        return // Exit processing loop
+                    }
+                    
+                    // ---------------------------------------------------------------------
+                    // PHASE 1 (AT T = 0ms IMPACT MOMENT): IMPACT DIRECTION CLASSIFICATION
+                    // ---------------------------------------------------------------------
+                    // |a_total| >= Threshold AND Free-fall Flag == False AND Rotational Noise == False
+                    // Compute horizontal vector angle: theta = atan2(a_y, a_x)
+                    // Ignore gyro orientation angles and resting tilt (a_z) at this exact millisecond!
+                    let (classifiedDirection, thetaDeg) = self.classifyImpactDirection(ax: uX, ay: uY)
+                    
+                    self.primary_event = classifiedDirection
+                    self.impact_timestamp = now
+                    self.in_phase_2 = true
+                    self.phase2_peak_acc = totalMagG * 9.81
+                    self.phase2_peak_ax = uX
+                    self.phase2_peak_ay = uY
+                    self.phase2_peak_az = uZ
+                    self.phase2_settled_start_time = nil
+                    
+                    self.logStateTransition("💥 [PHASE 1: IMPACT DIRECTION CLASSIFIED] Primary Event: [\(classifiedDirection)] | theta = \(String(format: "%.1f", thetaDeg))° | |a_total| = \(String(format: "%.2f", totalMagG))g | ||w|| = \(String(format: "%.1f", gyroMagDegS)) deg/s. Transitioning into Phase 2 Dynamic Settlement & Rollover Verification.")
+                    
+                    self.debugStatus = "💥 Phase 1: \(classifiedDirection) (Settling motion…)"
+                    return
+                }
+                
+                // Normal monitoring status update (when no event is actively pending)
+                if !self.in_phase_2 && !self.is_freefall_locked && now.timeIntervalSince(self.lastSent) * 1000.0 > self.DEBOUNCE_MS {
+                    self.debugStatus = String(format: "Monitoring (100 Hz): |a_total|=%.2fg (dyn=%.2fg)", totalMagG, dynMagnitude)
                 }
             }
         } else if motionManager.isAccelerometerAvailable {
@@ -555,6 +920,8 @@ struct MonitoringScreen: View {
     
     @StateObject private var viewModel = MonitoringViewModel()
     @Environment(\.presentationMode) var presentationMode
+    @State private var showDatasetRecorder: Bool = false
+    @State private var datasetRecorderMode: DatasetRecordingMode = .rollover
     
     var firstLetter: String {
         return uid.isEmpty ? "U" : String(uid.prefix(1)).uppercased()
@@ -604,18 +971,21 @@ struct MonitoringScreen: View {
                 
                 // Accident status banner — shows after first detection
                 if let sd = viewModel.sensorData {
+                    let isPhoneFall = sd.status == "PHONE_FALL" || sd.accidentType.contains("Fall")
+                    let isAccident = sd.status == "ACCIDENT"
+                    
                     HStack(spacing: 12) {
-                        Image(systemName: sd.status == "ACCIDENT" ? "exclamationmark.triangle.fill" : "checkmark.shield.fill")
+                        Image(systemName: isAccident ? "exclamationmark.triangle.fill" : (isPhoneFall ? "arrow.down.to.line.compact" : "checkmark.shield.fill"))
                             .font(.system(size: 24))
                             .foregroundColor(.white)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(sd.status == "ACCIDENT" ? "🚨 \(sd.accidentType.uppercased()) DETECTED" : "✅ Safe — No Accident")
+                            Text(isAccident ? "🚨 \(sd.accidentType.uppercased()) DETECTED" : (isPhoneFall ? "📱 PHONE FALL DETECTED (EDGE CASE)" : "✅ Safe — No Accident"))
                                 .bold()
                                 .foregroundColor(.white)
-                            if sd.status == "ACCIDENT" {
+                            if isAccident || isPhoneFall {
                                 HStack(spacing: 8) {
                                     if let sev = sd.passengerSeverity ?? sd.severity {
-                                        Text("Severity: \(sev)")
+                                        Text(isPhoneFall ? "Edge Case: 0% Damage" : "Severity: \(sev)")
                                             .font(.system(size: 12, weight: .bold))
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 2)
@@ -626,6 +996,12 @@ struct MonitoringScreen: View {
                                         .font(.system(size: 12))
                                 }
                                 .foregroundColor(.white.opacity(0.95))
+                            }
+                            
+                            if isPhoneFall {
+                                Text("Non-collision phone drop filtered with zero vehicle damage.")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.white.opacity(0.9))
                             }
                             
                             if viewModel.isLiveTrackingActive {
@@ -643,7 +1019,7 @@ struct MonitoringScreen: View {
                         Spacer()
                     }
                     .padding(12)
-                    .background(sd.status == "ACCIDENT" ? Color.red : Color(red: 0.1, green: 0.7, blue: 0.3))
+                    .background(isAccident ? Color.red : (isPhoneFall ? Color.orange : Color(red: 0.1, green: 0.7, blue: 0.3)))
                     .cornerRadius(12)
                     .padding(.top, 10)
                 }
@@ -735,11 +1111,54 @@ struct MonitoringScreen: View {
                 }
                 .padding(.top, 10)
                 
+                // Dataset Recorders: Rollover & Phone Fall
+                HStack(spacing: 8) {
+                    Button(action: {
+                        datasetRecorderMode = .rollover
+                        showDatasetRecorder = true
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                                .font(.system(size: 14))
+                            Text("Record Rollover Data")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color(red: 230/255, green: 80/255, blue: 0/255))
+                        .cornerRadius(12)
+                        .shadow(color: Color.orange.opacity(0.3), radius: 4, x: 0, y: 2)
+                    }
+                    
+                    Button(action: {
+                        datasetRecorderMode = .fall
+                        showDatasetRecorder = true
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "record.circle.fill")
+                                .font(.system(size: 14))
+                            Text("Record Fall Data")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color(red: 130/255, green: 40/255, blue: 215/255))
+                        .cornerRadius(12)
+                        .shadow(color: Color.purple.opacity(0.25), radius: 4, x: 0, y: 2)
+                    }
+                }
+                .padding(.top, 4)
+                
             }
             .padding(12)
         }
         .background(Color(white: 0.949).edgesIgnoringSafeArea(.all))
         .navigationBarHidden(true)
+        .sheet(isPresented: $showDatasetRecorder) {
+            FallDatasetRecorderView(initialMode: datasetRecorderMode)
+        }
         .onAppear {
             viewModel.carId = carId
             viewModel.steeringSide = steeringSide

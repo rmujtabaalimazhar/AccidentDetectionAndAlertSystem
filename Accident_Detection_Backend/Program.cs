@@ -27,15 +27,12 @@ builder.Services.AddHttpClient<LocationService>();
 // Register push notification service
 builder.Services.AddHttpClient<PushNotificationService>();
 
-// Register Dynamic Vehicle Crash Scaling & Edge-Case Engine Configuration
-var scalingConfig = builder.Configuration.GetSection("CrashScalingConfig").Get<AccidentDetectionAndAlertSystem.Configuration.CrashScalingConfig>()
-                    ?? builder.Configuration.GetSection("CrashScaling").Get<AccidentDetectionAndAlertSystem.Configuration.CrashScalingConfig>()
-                    ?? new AccidentDetectionAndAlertSystem.Configuration.CrashScalingConfig();
+// Register Dynamic Vehicle Crash Scaling Factors & Physical Constants
+var scalingConfig = builder.Configuration.GetSection("CrashScalingConfig").Get<Accident_Detection_Backend.Services.ScalingFactors>()
+                    ?? builder.Configuration.GetSection("CrashScaling").Get<Accident_Detection_Backend.Services.ScalingFactors>()
+                    ?? new Accident_Detection_Backend.Services.ScalingFactors();
 
 builder.Services.AddSingleton(scalingConfig);
-builder.Services.AddScoped<AccidentDetectionAndAlertSystem.Services.CrashFilterEngine>();
-builder.Services.AddScoped<AccidentDetectionAndAlertSystem.Services.BfsImpactEngine>();
-builder.Services.AddScoped<AccidentDetectionAndAlertSystem.Services.CrashAnalysisEngine>();
 
 
 

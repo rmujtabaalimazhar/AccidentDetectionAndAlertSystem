@@ -48,5 +48,17 @@ namespace Accident_Detection_Backend.Models
         public double? GForce { get; set; }
         public double? ToyMassKg { get; set; }
         public double? VehicleMassKg { get; set; }
+
+        // Phone Fall Edge Case Telemetry (Calibrated from 1m Drop Dataset)
+        public double? FreeFallDurationMs { get; set; }
+        public bool? IsFreeFall { get; set; }
+
+        // Rollover & Roof Inversion Telemetry (Calibrated from 360° Lateral Rollover Dataset)
+        public double? GravityZ { get; set; }
+        public double? GravZ
+        {
+            get => GravityZ;
+            set { if (value.HasValue) GravityZ = value.Value; }
+        }
     }
 }

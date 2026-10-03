@@ -22,6 +22,8 @@ struct VehicleScreen: View {
     @State private var selectedCarForDashboard: Car? = nil
     @State private var showFamilyMembers = false
     @State private var showGuardianAlerts = false
+    @State private var showDatasetRecorder = false
+    @State private var datasetRecorderMode: DatasetRecordingMode = .rollover
     
     func categoryName(id: Int) -> String {
         switch id {
@@ -150,35 +152,71 @@ struct VehicleScreen: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 16) {
-                    // Quick Action Emergency & Family Bar
-                    HStack(spacing: 12) {
+                    // Quick Action Emergency, Family & Dataset Recorders
+                    HStack(spacing: 6) {
                         Button(action: { showFamilyMembers = true }) {
-                            HStack(spacing: 8) {
+                            HStack(spacing: 3) {
                                 Image(systemName: "person.2.fill")
-                                    .font(.system(size: 15))
-                                Text("Family / Guardians")
-                                    .font(.system(size: 13, weight: .bold))
+                                    .font(.system(size: 11))
+                                Text("Guardians")
+                                    .font(.system(size: 10, weight: .bold))
                             }
                             .foregroundColor(.blue)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
                             .background(Color.white)
-                            .cornerRadius(12)
+                            .cornerRadius(10)
                             .shadow(color: Color.black.opacity(0.04), radius: 3)
                         }
                         
                         Button(action: { showGuardianAlerts = true }) {
-                            HStack(spacing: 8) {
+                            HStack(spacing: 3) {
                                 Image(systemName: "bell.fill")
-                                    .font(.system(size: 15))
-                                Text("Guardian Alerts")
-                                    .font(.system(size: 13, weight: .bold))
+                                    .font(.system(size: 11))
+                                Text("Alerts")
+                                    .font(.system(size: 10, weight: .bold))
                             }
                             .foregroundColor(.red)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
                             .background(Color.white)
-                            .cornerRadius(12)
+                            .cornerRadius(10)
+                            .shadow(color: Color.black.opacity(0.04), radius: 3)
+                        }
+                        
+                        Button(action: {
+                            datasetRecorderMode = .rollover
+                            showDatasetRecorder = true
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                                    .font(.system(size: 11))
+                                Text("Rollover")
+                                    .font(.system(size: 10, weight: .bold))
+                            }
+                            .foregroundColor(.orange)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.white)
+                            .cornerRadius(10)
+                            .shadow(color: Color.black.opacity(0.04), radius: 3)
+                        }
+                        
+                        Button(action: {
+                            datasetRecorderMode = .fall
+                            showDatasetRecorder = true
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "record.circle.fill")
+                                    .font(.system(size: 11))
+                                Text("Fall")
+                                    .font(.system(size: 10, weight: .bold))
+                            }
+                            .foregroundColor(.purple)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.white)
+                            .cornerRadius(10)
                             .shadow(color: Color.black.opacity(0.04), radius: 3)
                         }
                     }
@@ -304,6 +342,9 @@ struct VehicleScreen: View {
                 AlertsView(mode: .guardian, identifier: uid, onLogout: onLogout, onDismiss: {
                     showGuardianAlerts = false
                 })
+            }
+            .sheet(isPresented: $showDatasetRecorder) {
+                FallDatasetRecorderView(initialMode: datasetRecorderMode)
             }
             .onAppear {
                 fetchUserVehicles()
