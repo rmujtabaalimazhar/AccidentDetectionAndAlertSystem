@@ -251,43 +251,35 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
     }
     
     func determineExactSide(dynX: Double, dynY: Double, dynZ: Double, gravZ: Double, gyroMag: Double, isPhoneFall: Bool = false, rotatedPast90Deg: Bool = false) -> String {
-        // 1. Rollover Check: EXACTLY when phone rotates above 90 degrees with active roll/tumble motion
-        // (Prevents linear palm hits and table shocks from falsely triggering rollover)
-        if rotatedPast90Deg || (gravZ > 0.15 && gyroMag >= 2.0) {
-            return "Rollover"
-        }
-        
-        // 2. Phone Fall Edge Case: Gated by at least 1.75 feet drop height (free-fall >= 300ms)
+        // 1. Phone Fall Edge Case: Gated first so drops do not trigger collision or rollover
         if isPhoneFall {
             return "Phone Fall"
         }
         
-        // 3. Linear Impact Strike (Calibrated for Physical Palm & Obstacle Collision):
-        // Striking the Front (top edge) creates rearward deceleration in -Y
-        // Striking the Rear (bottom edge) creates forward acceleration in +Y
-        // Striking the Right side creates leftward deceleration in -X
-        // Striking the Left side creates rightward acceleration in +X
-        let absX = abs(dynX)
-        let absY = abs(dynY)
-        
-        if absX < 0.10 && absY < 0.10 {
-            return "Front" // Fallback default
+        // 2. Rollover Check: Inversion past 90 degrees with sustained tumble
+        if rotatedPast90Deg || (gravZ > 0.20 && gyroMag >= 3.0) {
+            return "Rollover"
         }
         
-        let ratio = absX / max(absY, 0.0001)
+        // 3. Directional Vector Analysis (Impact Side)
+        let lr = dynX // Left/Right axis
+        let fb = dynY // Front/Back axis
         
-        // Diagonal strike (balanced energy between longitudinal and lateral axes)
-        if absX >= 0.18 && absY >= 0.18 && ratio >= 0.45 && ratio <= 2.2 {
-            let lon = dynY <= 0 ? "Front" : "Rear"
-            let lat = dynX <= 0 ? "Right" : "Left"
-            return "\(lon)-\(lat)"
+        let absLR = abs(lr)
+        let absFB = abs(fb)
+        
+        if absLR < 0.3 && absFB < 0.3 {
+            return "Front" // Fallback / Minor
         }
         
-        // Orthogonal strike
-        if absY >= absX {
-            return dynY <= 0 ? "Front" : "Rear"
+        if absFB > absLR {
+            if fb > 0 {
+                return (absLR > 0.3) ? (lr > 0 ? "Front-Right" : "Front-Left") : "Front"
+            } else {
+                return (absLR > 0.3) ? (lr > 0 ? "Rear-Right" : "Rear-Left") : "Rear"
+            }
         } else {
-            return dynX <= 0 ? "Right" : "Left"
+            return lr > 0 ? "Right" : "Left"
         }
     }
     
@@ -444,18 +436,24 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
     /// Phase 1: Classify primary impact direction based solely on theta = atan2(a_y, a_x)
     /// Ignores gyro orientation angles and resting tilt (a_z) at this exact millisecond.
     func classifyImpactDirection(ax: Double, ay: Double) -> (event: String, thetaDeg: Double) {
+        let lr = ax // Left/Right axis
+        let fb = ay // Front/Back axis
+        let absLR = abs(lr)
+        let absFB = abs(fb)
         let thetaRad = atan2(ay, ax)
         let thetaDeg = thetaRad * (180.0 / Double.pi)
         
         let direction: String
-        if thetaDeg >= -45.0 && thetaDeg <= 45.0 {
-            direction = "FRONTAL COLLISION"
-        } else if (thetaDeg >= 135.0 && thetaDeg <= 180.0) || (thetaDeg >= -180.0 && thetaDeg <= -135.0) {
-            direction = "REAR COLLISION"
-        } else if thetaDeg > 45.0 && thetaDeg < 135.0 {
-            direction = "SIDE COLLISION (RIGHT)"
-        } else { // thetaDeg > -135.0 && thetaDeg < -45.0
-            direction = "SIDE COLLISION (LEFT)"
+        if absLR < 0.3 && absFB < 0.3 {
+            direction = "Minor"
+        } else if absFB > absLR {
+            if fb > 0 {
+                direction = (absLR > 0.3) ? (lr > 0 ? "Front-Right" : "Front-Left") : "Front"
+            } else {
+                direction = (absLR > 0.3) ? (lr > 0 ? "Rear-Right" : "Rear-Left") : "Rear"
+            }
+        } else {
+            direction = lr > 0 ? "Right" : "Left"
         }
         return (direction, thetaDeg)
     }
@@ -906,9 +904,9 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
                     let gy = motion.gravity.y
                     let gz = motion.gravity.z
                     
-                    // Pure Gravity Posture Check (Triggers when screen is tilted > 30° off flat)
-                    let isSideRolled = abs(gx) > 0.45 || abs(gy) > 0.45   // Rolled on left/right/top edge
-                    let isTiltedOrFlipped = gz > -0.80                      // Tilted > 35° off flat table level
+                    // Pure Gravity Posture Check: Only genuine sideways roll (> 58°) or roof inversion
+                    let isSideRolled = abs(gx) > 0.85 || abs(gy) > 0.85   // Rolled completely onto left/right/top edge
+                    let isTiltedOrFlipped = gz > 0.20                      // Screen inverted face-down on roof
                     let isRolledOverState = isSideRolled || isTiltedOrFlipped
                     
                     // Safe posture angle calculation for display / telemetry (clamped to prevent NaN)

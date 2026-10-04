@@ -98,33 +98,65 @@ namespace AccidentDetectionApi.Controllers
                 double toyForceNewtons = toyMassKg * (gForce * 9.81);
                 double realWorldForceNewtons = _scaling.ToRealWorldForce(toyForceNewtons, vehicleMassKg);
 
-                // 5. Determine 3D Impact Side & Rollover Kinematics (Calibrated from 360° Rollover Dataset)
-                string impactSide = ResolveImpactSide(request);
-                double totalGyroMag = Math.Sqrt(request.GyroX * request.GyroX + request.GyroY * request.GyroY + request.GyroZ * request.GyroZ);
-                bool hasRoofInversion = request.GravityZ.HasValue && request.GravityZ.Value >= _scaling.RolloverRoofInversionGravityZ;
-                
-                // Rollover Condition: Sustained angular roll (>= 4.5 rad/s) OR inverted orientation onto roof (Gz >= 0.50)
-                bool isRollover = impactSide.Contains("Rollover", StringComparison.OrdinalIgnoreCase) ||
-                                  request.AccidentType?.Contains("Rollover", StringComparison.OrdinalIgnoreCase) == true ||
-                                  totalGyroMag >= _scaling.RolloverGyroMagnitudeThreshold ||
-                                  (hasRoofInversion && totalGyroMag >= 1.5);
+                // ============================================================
+                // 1. DIRECTIONAL VECTOR ANALYSIS (Impact Side)
+                // ============================================================
+                double lr = request.AccelX; // Left/Right axis
+                double fb = request.AccelY; // Front/Back axis
 
-                string accidentType;
-                if (isRollover)
+                double absLR = Math.Abs(lr);
+                double absFB = Math.Abs(fb);
+
+                string impactSide;
+                if (absLR < 0.3 && absFB < 0.3)
                 {
-                    accidentType = "Rollover";
-                    if (!impactSide.Contains("Rollover", StringComparison.OrdinalIgnoreCase))
+                    impactSide = "Minor";
+                }
+                else if (absFB > absLR)
+                {
+                    if (fb > 0)
                     {
-                        impactSide = "Rollover";
+                        impactSide = (absLR > 0.3) ? (lr > 0 ? "Front-Right" : "Front-Left") : "Front";
+                    }
+                    else
+                    {
+                        impactSide = (absLR > 0.3) ? (lr > 0 ? "Rear-Right" : "Rear-Left") : "Rear";
                     }
                 }
-                else if (impactSide.Contains("Front", StringComparison.OrdinalIgnoreCase))
+                else
                 {
-                    accidentType = "Frontal Collision";
+                    impactSide = lr > 0 ? "Right" : "Left";
                 }
-                else if (impactSide.Contains("Rear", StringComparison.OrdinalIgnoreCase))
+
+                // If caller explicitly supplied a valid ImpactSide from dynamic sensor filtering, honor it
+                if (!string.IsNullOrWhiteSpace(request.ImpactSide) &&
+                    !request.ImpactSide.Equals("Unknown", StringComparison.OrdinalIgnoreCase) &&
+                    !request.ImpactSide.Equals("Minor", StringComparison.OrdinalIgnoreCase) &&
+                    !request.ImpactSide.Equals("None", StringComparison.OrdinalIgnoreCase) &&
+                    !request.ImpactSide.Equals("-", StringComparison.OrdinalIgnoreCase))
                 {
-                    accidentType = "Rear Collision";
+                    impactSide = request.ImpactSide.Trim();
+                }
+
+                // ============================================================
+                // 2. ACCIDENT TYPE CLASSIFICATION DECOUPLING
+                // ============================================================
+                double totalGyro = Math.Sqrt(request.GyroX * request.GyroX + request.GyroY * request.GyroY + request.GyroZ * request.GyroZ);
+                bool isViolentRotation = totalGyro > 50.0; // rad/s threshold
+                bool isUpsideDown = request.AccelZ < -1.3;  // Inverted vertical axis
+
+                string accidentType;
+                bool isRollover = false;
+
+                if (impactSide.Contains("Rollover", StringComparison.OrdinalIgnoreCase) || isViolentRotation || isUpsideDown)
+                {
+                    accidentType = "Rollover";
+                    impactSide = "Rollover";
+                    isRollover = true;
+                }
+                else if (absFB > absLR)
+                {
+                    accidentType = fb > 0 ? "Frontal Collision" : "Rear Collision";
                 }
                 else
                 {
@@ -138,8 +170,37 @@ namespace AccidentDetectionApi.Controllers
                         ? car.Steering_Side.Trim()
                         : "Right-Hand");
 
-                // 6. Breadth-First Search (BFS) Chassis Graph Propagation & Cabin Damage
-                int startNode = ResolveStartNode(nodeEntities, categoryId, impactSide);
+                // ============================================================
+                // 3. PRESERVE NODE GRAPH PROPAGATION
+                // ============================================================
+                int startNode;
+                switch (impactSide)
+                {
+                    case "Front": startNode = 2; break;
+                    case "Front-Left": startNode = 1; break;
+                    case "Front-Right": startNode = 3; break;
+                    case "Left": startNode = 17; break;
+                    case "Right": startNode = 18; break;
+                    case "Rear": startNode = 20; break;
+                    case "Rear-Left": startNode = 19; break;
+                    case "Rear-Right": startNode = 21; break;
+                    default: startNode = 4; break;
+                }
+
+                if (nodeEntities.Any() && !nodeEntities.Any(n => n.Node_Id == startNode))
+                {
+                    var dbMatchedNode = nodeEntities
+                        .FirstOrDefault(n => (n.Node_Position ?? "").Trim().ToLower() == impactSide.ToLower());
+                    if (dbMatchedNode != null)
+                    {
+                        startNode = dbMatchedNode.Node_Id;
+                    }
+                    else
+                    {
+                        startNode = ResolveStartNode(nodeEntities, categoryId, impactSide);
+                    }
+                }
+
                 var absorptionMap = nodeEntities.ToDictionary(n => n.Node_Id, n => (double)(n.Force ?? 0.0m));
                 var (nodeForces, deadEndForces) = PropagateForceThroughChassis(connectionEntities, absorptionMap, startNode, realWorldForceNewtons, isRollover);
 
@@ -513,9 +574,29 @@ namespace AccidentDetectionApi.Controllers
         /// </summary>
         private bool IsPhoneFallEdgeCase(AccidentRequest request, double gForce)
         {
-            // Rollover Exemption (Empirically Calibrated from Trial_1_-_Lateral_Rollover_(360°).csv):
-            // Rollover trials produced sustained angular velocity of 8.3 - 35.4 rad/s and Gz inversion up to +1.0.
-            // A rollover is NEVER a phone drop!
+            // Condition 1: Explicitly tagged or classified by frontend CoreMotion sensor fusion
+            if (!string.IsNullOrWhiteSpace(request.AccidentType) &&
+                request.AccidentType.Contains("Fall", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.ImpactSide) &&
+                request.ImpactSide.Contains("Fall", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            // Condition 2: Verified Free-Fall Weightlessness Duration from sensor tracking
+            // Measured zero-G duration >= 120ms or explicit isFreeFall flag
+            if ((request.FreeFallDurationMs.HasValue && request.FreeFallDurationMs.Value >= _scaling.MinimumFreeFallDurationMs) ||
+                (request.IsFreeFall.HasValue && request.IsFreeFall.Value))
+            {
+                return true;
+            }
+
+            // Rollover Exemption:
+            // A verified rollover is not a phone drop
             if (!string.IsNullOrWhiteSpace(request.ImpactSide) &&
                 request.ImpactSide.Contains("Rollover", StringComparison.OrdinalIgnoreCase))
             {
@@ -534,35 +615,10 @@ namespace AccidentDetectionApi.Controllers
             }
 
             double totalGyroMag = Math.Sqrt(request.GyroX * request.GyroX + request.GyroY * request.GyroY + request.GyroZ * request.GyroZ);
-            if (totalGyroMag >= _scaling.RolloverGyroMagnitudeThreshold)
+            if (totalGyroMag > 50.0)
             {
-                // High rotational velocity (>= 4.5 rad/s) is a ROLLOVER tumble, not a vertical free-fall drop!
+                // Extreme violent rotation (> 50.0 rad/s) is rollover/violent crash
                 return false;
-            }
-
-            // Condition 1: Explicitly tagged or classified by frontend CoreMotion sensor fusion
-            if (!string.IsNullOrWhiteSpace(request.AccidentType) &&
-                request.AccidentType.Contains("Fall", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            if (!string.IsNullOrWhiteSpace(request.ImpactSide) &&
-                request.ImpactSide.Contains("Fall", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            // Condition 2: Verified Free-Fall Weightlessness Duration from 50Hz sensor tracking
-            // Must have fallen from at least 1.75 feet: measured zero-G duration >= 120ms
-            if (request.FreeFallDurationMs.HasValue && request.FreeFallDurationMs.Value >= _scaling.MinimumFreeFallDurationMs)
-            {
-                return true;
-            }
-
-            if (request.IsFreeFall.HasValue && request.IsFreeFall.Value)
-            {
-                return true;
             }
 
             // Condition 3: Kinematic fall signature (transient spike with vertical Z-dominance)
@@ -753,18 +809,23 @@ namespace AccidentDetectionApi.Controllers
             double absLR = Math.Abs(lr);
             double absFB = Math.Abs(fb);
 
-            if (absLR < 0.1 && absFB < 0.1) return "Front";
+            if (absLR < 0.3 && absFB < 0.3) return "Minor";
 
-            double ratio = absLR / Math.Max(absFB, 0.0001);
-            if (absLR >= 0.2 && absFB >= 0.2 && ratio >= 0.45 && ratio <= 2.2)
+            if (absFB > absLR)
             {
-                string longitudinal = fb <= 0 ? "Front" : "Rear";
-                string lateral = lr <= 0 ? "Right" : "Left";
-                return $"{longitudinal}-{lateral}";
+                if (fb > 0)
+                {
+                    return (absLR > 0.3) ? (lr > 0 ? "Front-Right" : "Front-Left") : "Front";
+                }
+                else
+                {
+                    return (absLR > 0.3) ? (lr > 0 ? "Rear-Right" : "Rear-Left") : "Rear";
+                }
             }
-
-            if (absFB >= absLR) return fb <= 0 ? "Front" : "Rear";
-            return lr <= 0 ? "Right" : "Left";
+            else
+            {
+                return lr > 0 ? "Right" : "Left";
+            }
         }
 
         /// <summary>
