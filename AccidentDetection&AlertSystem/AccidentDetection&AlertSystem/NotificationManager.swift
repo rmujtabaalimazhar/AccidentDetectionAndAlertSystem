@@ -50,12 +50,13 @@ class NotificationManager: NSObject, ObservableObject, UNUserNotificationCenterD
             }
         }
     }
-    
+     
     func didRegisterRemoteToken(_ tokenData: Data) {
         let tokenString = tokenData.map { String(format: "%02.2hhx", $0) }.joined()
         self.deviceToken = tokenString
         UserDefaults.standard.set(tokenString, forKey: "savedDeviceToken")
         print("[NotificationManager] Registered Device Token: \(tokenString)")
+        
         
         // Sync with backend if user already logged in
         if let role = currentUserRole, let id = currentUserIdentifier {

@@ -42,9 +42,9 @@ namespace Accident_Detection_Backend.Services
         public double RolloverGyroMagnitudeThreshold { get; set; } = 4.5;  // Sustained angular velocity threshold (rad/s) for rollover classification
         public double RolloverRoofInversionGravityZ { get; set; } = 0.50;  // Upright gravity is -1.0; inverted roof contact is +0.50 to +1.00
 
-        // Phone Fall Edge-Case Height Calibration (At least 1.75 feet: measured sensor zero-G >= 120ms)
-        public double MinimumFallHeightFeet { get; set; } = 1.75;
-        public double MinimumFreeFallDurationMs { get; set; } = 120.0; // Measured airborne weightless duration (ms) for >= 1.75 ft drop qualification
+        // Phone Fall Edge-Case Height Calibration (At least 1 foot: measured sensor zero-G >= 50ms)
+        public double MinimumFallHeightFeet { get; set; } = 1.0;
+        public double MinimumFreeFallDurationMs { get; set; } = 50.0; // Measured airborne weightless duration (ms) for >= 1 ft drop qualification
 
         // ==========================================
         // 4. STRUCTURAL & BIOMECHANICAL MULTIPLIERS

@@ -81,30 +81,41 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
     // REQUIRED PRIORITIZED STATE MACHINE STATE VARIABLES & CONSTANTS
     // =========================================================================
     
-    // 1. Architectural Required State Variables
+    // 1. Architectural Required State Variables & Persistent Free-Fall Latch
     @Published var is_freefall_locked: Bool = false            // Lockout flag disabling vehicle & rollover checks
-    var freefall_lockout_until: Date = Date.distantPast        // Absolute lockout expiry timestamp (2000ms)
+    var freefall_lockout_until: Date = Date.distantPast        // Absolute lockout expiry timestamp
+    @Published var is_freefall_latched: Bool = false           // Persistent latch permanently blocking rollover checks after drop
+    var freefall_latch_expiration: Date = Date.distantPast     // 3.0s window for persistent free-fall latch
     var impact_timestamp: Date? = nil                          // Exact timestamp of T=0ms impact spike
     @Published var primary_event: String? = nil                // T=0ms classified primary event (e.g. SIDE COLLISION (RIGHT))
     @Published var in_phase_2: Bool = false                    // Active Phase 2 dynamic settlement & rollover verification flag
     
-    // 2. Calibrated Architectural Thresholds & Constants
-    let FREEFALL_ACC_THRESHOLD_G: Double = 0.25            // Top Priority: |a_total| < 0.25g indicates weightless free-fall
-    let FREEFALL_MIN_DURATION_MS: Double = 120.0           // Minimum continuous zero-G duration before impact spike
-    let FREEFALL_LOCKOUT_MS: Double = 2000.0               // Disables all vehicle accident & rollover checks for 2000ms
+    // 2. Calibrated Architectural Thresholds & Constants (Persistent Free-Fall Latch)
+    let FREEFALL_ACC_THRESHOLD_G: Double = 0.40            // Zero-G threshold: |a_total| < 0.40g indicates weightless free-fall
+    let FREEFALL_MIN_SAMPLES: Int = 5                      // Windowed sample counter: at least 5 samples at 100 Hz (>= 50ms low-g)
+    let FREEFALL_WINDOW_MS: Double = 200.0                 // Evaluates low-g sample count within the last 200ms buffer window
+    let FREEFALL_MIN_DURATION_MS: Double = 50.0            // Minimum low-g duration (50ms)
+    let FREEFALL_LOCKOUT_MS: Double = 3000.0               // Persistent latch window: 3000ms (3.0s) blocks all rollover checks
     let ROTATIONAL_NOISE_THRESHOLD_DEG_S: Double = 600.0   // 2nd Priority: ||w|| > 600 deg/s at peak impact rejects hand slap
     let IMPACT_COLLISION_THRESHOLD_G: Double = 4.0         // Collision impact threshold (|a_total| >= 4.0g)
     let PHASE2_SETTLED_GYRO_DEG_S: Double = 30.0           // Phase 2: Motion considered settled when ||w|| < 30 deg/s
     let PHASE2_MIN_SETTLED_MS: Double = 150.0              // Physical motion must remain settled for at least 150ms
     let PHASE2_MAX_TIMEOUT_MS: Double = 500.0              // Max dynamic settlement timeout (500ms)
-    let ROLLOVER_POSTURE_ANGLE_DEG: Double = 60.0          // Static posture tilt phi = acos(|az|/|atotal|) > 60° confirms rollover
+    let ROLLOVER_POSTURE_ANGLE_DEG: Double = 35.0          // Static posture tilt phi = acos(|az|/|atotal|) > 35° confirms rollover
     
-    // 3. Dynamic Motion Settlement & Posture Tracking Variables (Phase 2)
+    // 3. Dynamic Motion Settlement & Posture Tracking Variables (Phase 2 & Standalone)
     private var phase2_peak_acc: Double = 0.0
     private var phase2_peak_ax: Double = 0.0
     private var phase2_peak_ay: Double = 0.0
     private var phase2_peak_az: Double = 0.0
     private var phase2_settled_start_time: Date? = nil
+    
+    // Standalone / Handheld Rollover Tracking (Screen Orientation Matrix)
+    let STANDALONE_ROLLOVER_REST_GYRO_DEG_S: Double = 45.0    // Rest threshold: ||w|| < 45 deg/s allows jerky motions
+    let STANDALONE_ROLLOVER_MIN_REST_MS: Double = 150.0       // Resting at posture for >= 150ms (quick handheld response)
+    let STANDALONE_ROLLOVER_MAX_POSTURE_MS: Double = 250.0    // Continuous posture for >= 250ms fallback
+    private var standalone_rollover_posture_start_time: Date? = nil // Timestamp when rolled-over posture began
+    private var standalone_rollover_rest_start_time: Date? = nil    // Timestamp when quiet rest (< 45 deg/s) began
     
     // 4. 100 Hz IMU Rolling Buffer (stores last ~300ms of readings prior to impact)
     struct IMUReading {
@@ -288,7 +299,7 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         lastSent = now
         
         DispatchQueue.main.async {
-            self.debugStatus = isPhoneFall ? "📱 Sending Phone Fall Edge Case…" : (detectedSide.contains("Rollover") ? "🔄 Sending Rollover Crash…" : "📡 Sending to API…")
+            self.debugStatus = isPhoneFall ? "📱 Sending Phone Fall Edge Case…" : (detectedSide.lowercased().contains("rollover") ? "🔄 Sending Rollover Crash…" : "📡 Sending to API…")
         }
         
         guard let url = URL(string: "\(API)/DetectAccident/ImpactCalculation") else { return }
@@ -302,8 +313,8 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         let isoFormatter = ISO8601DateFormatter()
         let timeIso = isoFormatter.string(from: now)
         
-        let isRollover = detectedSide.contains("Rollover")
-        let isFall = !isRollover && (isPhoneFall || detectedSide.contains("Fall"))
+        let isRollover = detectedSide.lowercased().contains("rollover")
+        let isFall = !isRollover && (isPhoneFall || detectedSide.lowercased().contains("fall") || detectedSide.lowercased().contains("drop"))
         
         let body: [String: Any] = [
             "CarId": effectiveCarId,
@@ -449,43 +460,29 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         return (direction, thetaDeg)
     }
     
-    /// Top Priority: Evaluates pre-impact rolling buffer for continuous weightlessness (|a_total| < 0.25g for >= 120ms)
-    private func checkContinuousFreefall(priorTo spikeTime: Date) -> (isFreefall: Bool, durationMs: Double) {
-        // Filter rolling buffer readings in the 300ms window preceding the impact spike
-        let preSpike = imuBuffer.filter { reading in
+    /// Top Priority: Evaluates pre-impact rolling buffer for zero-g state (|a_total| < 0.40g for >= 50ms in the last 200ms buffer)
+    /// Physics Principle: Airborne free-fall causes sensor weightlessness (< 0.40g). Ground vehicle impacts are never preceded by weightlessness.
+    /// If AT LEAST 5 samples within the last 200ms buffer read |a_total| < 0.40g, returns isFreefall = true.
+    private func checkWindowedFreefall(priorTo spikeTime: Date) -> (isFreefall: Bool, lowGSampleCount: Int, totalSamplesInWindow: Int, durationMs: Double) {
+        // Filter rolling buffer readings in the 200ms window preceding the impact spike
+        let windowReadings = imuBuffer.filter { reading in
             let delta = spikeTime.timeIntervalSince(reading.timestamp)
-            return delta >= 0 && delta <= 0.30
-        }.sorted { $0.timestamp > $1.timestamp }
-        
-        var consecutiveCount = 0
-        var firstTime: Date? = nil
-        var lastTime: Date? = nil
-        var skippedTransitionFrames = 0
-        
-        for reading in preSpike {
-            if reading.totalAccelG < FREEFALL_ACC_THRESHOLD_G {
-                consecutiveCount += 1
-                if firstTime == nil { firstTime = reading.timestamp }
-                lastTime = reading.timestamp
-            } else {
-                if consecutiveCount > 0 {
-                    break
-                } else if skippedTransitionFrames < 2 {
-                    // Allow up to 2 transition frames leading into the impact shock front
-                    skippedTransitionFrames += 1
-                } else {
-                    break
-                }
-            }
+            return delta >= 0 && delta <= (FREEFALL_WINDOW_MS / 1000.0) // 200ms buffer window
         }
+        
+        let lowGSamples = windowReadings.filter { $0.totalAccelG < FREEFALL_ACC_THRESHOLD_G } // < 0.40g
+        let lowGCount = lowGSamples.count
+        let totalCount = windowReadings.count
         
         var durationMs: Double = 0.0
-        if let first = firstTime, let last = lastTime {
-            durationMs = abs(first.timeIntervalSince(last)) * 1000.0 + 10.0
+        if let earliest = lowGSamples.min(by: { $0.timestamp < $1.timestamp }),
+           let latest = lowGSamples.max(by: { $0.timestamp < $1.timestamp }) {
+            durationMs = abs(latest.timestamp.timeIntervalSince(earliest.timestamp)) * 1000.0 + 10.0
         }
         
-        let qualifies = consecutiveCount >= 12 || durationMs >= FREEFALL_MIN_DURATION_MS
-        return (qualifies, max(durationMs, Double(consecutiveCount) * 10.0))
+        // Windowed counter requirement: AT LEAST 5 samples at 100 Hz (< 0.40g for >= 50ms) within 200ms window
+        let isFreefall = lowGCount >= FREEFALL_MIN_SAMPLES
+        return (isFreefall, lowGCount, totalCount, max(durationMs, Double(lowGCount) * 10.0))
     }
     
     /// Phase 2: Dynamic Motion Settlement & Rollover Verification
@@ -499,6 +496,26 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         totalMagG: Double,
         totZ: Double
     ) {
+        let now = Date()
+        
+        // ---------------------------------------------------------------------
+        // STRICT PHASE 2 ROLLOVER BLOCK (PERSISTENT FREE-FALL LATCH)
+        // ---------------------------------------------------------------------
+        // Physics Principle: Free-fall precedes landing tumbling; vehicles on ground
+        // do not experience pre-impact free-fall. If free-fall was latched within 3.0s,
+        // any post-landing tilt/inversion (phi > 60°) is pure landing bounce/tumble noise.
+        if (self.is_freefall_latched && now < self.freefall_latch_expiration) ||
+           (self.is_freefall_locked && now < self.freefall_lockout_until) {
+            let ratio = min(1.0, max(0.0, abs(totZ) / max(totalMagG, 0.0001)))
+            let phiDeg = acos(ratio) * (180.0 / Double.pi)
+            logStateTransition("🛡️ [FREE-FALL LATCH ACTIVE] Suppressing post-landing rollover check (a_total spike: \(String(format: "%.1f", totalMagG))g, tilt: \(String(format: "%.0f", phiDeg))° ignored).")
+            in_phase_2 = false
+            primary_event = nil
+            impact_timestamp = nil
+            phase2_settled_start_time = nil
+            return // EXIT PHASE 2 IMMEDIATELY; DO NOT EVALUATE TILT ANGLE
+        }
+        
         if isTimeout {
             logStateTransition("⏱️ [PHASE 2 TIMING] Motion settlement reached max timeout limit (\(String(format: "%.0f", totalElapsedMs))ms). Evaluating static posture angle.")
         } else {
@@ -576,10 +593,14 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
         self.readCount = 0
         self.is_freefall_locked = false
         self.freefall_lockout_until = Date.distantPast
+        self.is_freefall_latched = false
+        self.freefall_latch_expiration = Date.distantPast
         self.impact_timestamp = nil
         self.primary_event = nil
         self.in_phase_2 = false
         self.phase2_settled_start_time = nil
+        self.standalone_rollover_posture_start_time = nil
+        self.standalone_rollover_rest_start_time = nil
         self.imuBuffer.removeAll()
         self.freefallStreakStartTime = nil
         self.lastQualifiedFreefallDurationMs = 0.0
@@ -669,23 +690,108 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
                 }
                 
                 // =========================================================================
-                // TOP PRIORITY: FREE-FALL / PHONE DROP LOCKOUT INTERLOCK
+                // 1. PERSISTENT FREE-FALL LATCH INTERLOCK (LOCKOUT ACTIVE CHECK)
                 // =========================================================================
-                if self.is_freefall_locked {
-                    if now < self.freefall_lockout_until {
-                        let remainingMs = self.freefall_lockout_until.timeIntervalSince(now) * 1000.0
-                        self.debugStatus = String(format: "🔒 Free-fall Lockout: %.0fms remaining", remainingMs)
-                        return // Disabling all Vehicle Accident and Rollover checks for 2000ms
+                // Physics Principle: Free-fall precedes landing tumbling; vehicles on ground
+                // do not experience pre-impact free-fall. Ground vehicles stay grounded (1.0g
+                // baseline) prior to collision impacts. Airborne drops produce weightlessness
+                // (|a_total| < 0.40g for >= 50ms in the 200ms pre-impact buffer).
+                // During the 3.0s latch window post-drop, all bounce spikes and rollover checks are blocked.
+                if self.is_freefall_latched || self.is_freefall_locked {
+                    self.standalone_rollover_posture_start_time = nil // Never accumulate rollover streak while drop lockout is active
+                    self.standalone_rollover_rest_start_time = nil
+                    if now < self.freefall_latch_expiration {
+                        let ratio = min(1.0, max(0.0, abs(totZ) / max(totalMagG, 0.0001)))
+                        let phiDeg = acos(ratio) * (180.0 / Double.pi)
+                        
+                        // Terminal demo logging: Prove post-landing tumbling is explicitly classified as drop noise
+                        if totalMagG >= self.IMPACT_COLLISION_THRESHOLD_G || gyroMagDegS > 150.0 {
+                            self.logStateTransition(String(format: "🛡️ [FREE-FALL LATCH ACTIVE] Suppressing post-landing rollover check (a_total spike: %.1fg, tilt: %.0f° ignored).", totalMagG, phiDeg))
+                        }
+                        
+                        let remainingMs = self.freefall_latch_expiration.timeIntervalSince(now) * 1000.0
+                        self.debugStatus = String(format: "🔒 Free-Fall Latch Active: %.0fms remaining (Drop Noise Filtered)", remainingMs)
+                        return // Exit immediately for this frame — do not evaluate collision or rollover
                     } else {
+                        self.is_freefall_latched = false
                         self.is_freefall_locked = false
-                        self.logStateTransition("🔓 [LOCKOUT EXPIRED] 2000ms free-fall lockout completed. Vehicle crash detection re-armed.")
+                        self.logStateTransition("🔓 [FREE-FALL LATCH EXPIRED] 3.0s free-fall lockout completed. Vehicle crash detection re-armed.")
                     }
+                }
+                
+                // =========================================================================
+                // 2. PRE-IMPACT ROLLING BUFFER ZERO-G CHECK & PERSISTENT LATCH TRIGGER
+                // =========================================================================
+                // Check pre-impact rolling buffer for zero-g state (|a_total| < 0.40g for >= 50ms total in the last 200ms buffer).
+                let (is_freefall_detected, lowGSampleCount, totalSamplesInWindow, dropDurationMs) = self.checkWindowedFreefall(priorTo: now)
+                
+                // When Free-Fall is identified (either at landing impact spike or during airborne zero-g):
+                if is_freefall_detected && (!self.is_freefall_latched || now >= self.freefall_latch_expiration) {
+                    // 1. Set is_freefall_latched = True
+                    self.is_freefall_latched = true
+                    // 2. Set freefall_latch_expiration = current_time + 3.0s (3-second window)
+                    self.freefall_latch_expiration = now.addingTimeInterval(self.FREEFALL_LOCKOUT_MS / 1000.0) // 3.0s
+                    self.is_freefall_locked = true
+                    self.freefall_lockout_until = self.freefall_latch_expiration
+                    
+                    // Abort any in-progress Phase 2 or Standalone Rollover immediately
+                    self.in_phase_2 = false
+                    self.primary_event = nil
+                    self.impact_timestamp = nil
+                    self.phase2_settled_start_time = nil
+                    self.standalone_rollover_posture_start_time = nil
+                    self.standalone_rollover_rest_start_time = nil
+                    
+                    // 3. Output Event: "PHONE DROP / FALL DETECTED"
+                    self.logStateTransition("⚠️ [PHONE DROP / FALL DETECTED] Pre-impact zero-g verified (|a_total| < 0.40g for \(lowGSampleCount)/\(totalSamplesInWindow) samples [\(String(format: "%.0f", dropDurationMs))ms] in last 200ms, spike: \(String(format: "%.1f", totalMagG))g). Persistent Free-Fall Latch set for 3.0s.")
+                    self.debugStatus = String(format: "📱 PHONE DROP / FALL DETECTED (%d/%d low-g samples) — Latch 3.0s", lowGSampleCount, totalSamplesInWindow)
+                    
+                    // Transmit drop event telemetry to backend
+                    let coords = self.currentLocation ?? CLLocationCoordinate2D(latitude: 0, longitude: 0)
+                    self.sendImpact(
+                        acceleration: max(totalMagG * 9.81, 9.81),
+                        coords: coords,
+                        detectedSide: "PHONE DROP / FALL DETECTED",
+                        dynX: uX,
+                        dynY: uY,
+                        dynZ: uZ,
+                        gravZ: gZ,
+                        durationMs: max(dropDurationMs, 30.0),
+                        isPhoneFall: true,
+                        freeFallMs: dropDurationMs
+                    )
+                    
+                    // Exit immediately for this frame — DO NOT pass execution to Phase 1 or Phase 2
+                    return
                 }
                 
                 // =========================================================================
                 // PHASE 2: DYNAMIC MOTION SETTLEMENT & ROLLOVER VERIFICATION
                 // =========================================================================
-                if self.in_phase_2, let impactTime = self.impact_timestamp, let currentPrimary = self.primary_event {
+                if self.in_phase_2 {
+                    // ---------------------------------------------------------------------
+                    // STRICT PHASE 2 ROLLOVER BLOCK (INTERLOCK CONDITION AT VERY TOP)
+                    // ---------------------------------------------------------------------
+                    // Physics Principle: Free-fall precedes landing tumbling; vehicles on ground
+                    // do not experience pre-impact free-fall. If free-fall was latched within 3.0s,
+                    // any post-landing tilt/inversion (phi > 60°) is pure landing bounce/tumble noise.
+                    if (self.is_freefall_latched && now < self.freefall_latch_expiration) ||
+                       (self.is_freefall_locked && now < self.freefall_lockout_until) {
+                        let ratio = min(1.0, max(0.0, abs(totZ) / max(totalMagG, 0.0001)))
+                        let phiDeg = acos(ratio) * (180.0 / Double.pi)
+                        self.logStateTransition(String(format: "🛡️ [FREE-FALL LATCH ACTIVE] Suppressing post-landing rollover check (a_total spike: %.1fg, tilt: %.0f° ignored).", totalMagG, phiDeg))
+                        self.in_phase_2 = false
+                        self.primary_event = nil
+                        self.impact_timestamp = nil
+                        self.phase2_settled_start_time = nil
+                        return // EXIT PHASE 2 IMMEDIATELY; DO NOT EVALUATE TILT ANGLE
+                    }
+                    
+                    guard let impactTime = self.impact_timestamp, let currentPrimary = self.primary_event else {
+                        self.in_phase_2 = false
+                        return
+                    }
+                    
                     let timeSinceImpactMs = now.timeIntervalSince(impactTime) * 1000.0
                     
                     // Track peak acceleration during dynamic impact interval
@@ -739,49 +845,17 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
                 }
                 
                 // =========================================================================
-                // IMPACT SPIKE EVALUATION: PRIORITIES 1 & 2 + PHASE 1 CLASSIFICATION
+                // VEHICLE COLLISION IMPACT SPIKE EVALUATION: PRIORITIES 2 & PHASE 1
                 // =========================================================================
                 if totalMagG >= self.IMPACT_COLLISION_THRESHOLD_G {
-                    // Debounce check
-                    if now.timeIntervalSince(self.lastSent) * 1000.0 < self.DEBOUNCE_MS { return }
-                    
-                    // ---------------------------------------------------------------------
-                    // TOP PRIORITY: FREE-FALL / PHONE DROP INTERLOCK
-                    // ---------------------------------------------------------------------
-                    // Check rolling buffer: |a_total| < 0.25g for >= 120ms continuously before impact spike
-                    let (bufferFreefall, bufferDuration) = self.checkContinuousFreefall(priorTo: now)
-                    let recentStreakFreefall = (now.timeIntervalSince(self.lastQualifiedFreefallEndTime) <= 0.10)
-                    
-                    if bufferFreefall || recentStreakFreefall {
-                        let dropDurationMs = max(bufferDuration, self.lastQualifiedFreefallDurationMs)
-                        
-                        // 1. Emit Event: "PHONE DROP / FALL DETECTED"
-                        self.logStateTransition("⚠️ [TOP PRIORITY: FREE-FALL INTERLOCK] PHONE DROP / FALL DETECTED (Pre-impact zero-g duration: \(String(format: "%.0f", dropDurationMs))ms). Setting Lockout Flag for 2000ms. Disabling vehicle crash & rollover checks.")
-                        
-                        // 2. Set Lockout Flag disabling all Vehicle Accident and Rollover checks for 2000ms
-                        self.is_freefall_locked = true
-                        self.freefall_lockout_until = now.addingTimeInterval(self.FREEFALL_LOCKOUT_MS / 1000.0)
-                        
-                        self.debugStatus = String(format: "📱 PHONE DROP / FALL DETECTED (%.0fms) — Lockout 2s", dropDurationMs)
-                        
-                        // Transmit safe fall edge case
-                        let coords = self.currentLocation ?? CLLocationCoordinate2D(latitude: 0, longitude: 0)
-                        self.sendImpact(
-                            acceleration: totalMagG * 9.81,
-                            coords: coords,
-                            detectedSide: "PHONE DROP / FALL DETECTED",
-                            dynX: uX,
-                            dynY: uY,
-                            dynZ: uZ,
-                            gravZ: gZ,
-                            durationMs: 30.0,
-                            isPhoneFall: true,
-                            freeFallMs: dropDurationMs
-                        )
-                        
-                        // 3. Exit processing loop for this window
+                    // Interlock: Persistent Free-Fall Latch blocks all vehicle collision checks
+                    if (self.is_freefall_latched && now < self.freefall_latch_expiration) ||
+                       (self.is_freefall_locked && now < self.freefall_lockout_until) {
                         return
                     }
+                    
+                    // Debounce check
+                    if now.timeIntervalSince(self.lastSent) * 1000.0 < self.DEBOUNCE_MS { return }
                     
                     // ---------------------------------------------------------------------
                     // SECOND PRIORITY: ROTATIONAL NOISE / HAND SLAP FILTER
@@ -814,6 +888,102 @@ class MonitoringViewModel: NSObject, ObservableObject, CLLocationManagerDelegate
                     
                     self.debugStatus = "💥 Phase 1: \(classifiedDirection) (Settling motion…)"
                     return
+                }
+                
+                // =========================================================================
+                // STANDALONE / SCREEN ORIENTATION MATRIX ROLLOVER DETECTION (HANDHELD)
+                // =========================================================================
+                // Physics Principle:
+                // - Path 1 (Impact-Induced): Vehicle crashes at speed (|a_total| >= 4.0g) and then
+                //   tumbles into a rollover (verified via Phase 1 -> Phase 2 settlement).
+                // - Path 2 (Standalone Handheld & Slow-Tip): Evaluates a Screen Orientation Matrix
+                //   with a 35° tilt threshold and 150ms settlement window. Triggers reliably for
+                //   lateral side-rolls (|ay| or |ax| > 0.45g), steep tilts (phi > 35°), and face-down turns (az > -0.30g).
+                // Interlock: If Free-Fall is latched, standalone rollover is completely bypassed.
+                if !self.is_freefall_latched && !self.is_freefall_locked && !self.in_phase_2 {
+                    // Pure Apple CoreMotion Gravity Vector Check (Normalized 1.0g reference, prevents NaN / sign bugs)
+                    let gx = motion.gravity.x
+                    let gy = motion.gravity.y
+                    let gz = motion.gravity.z
+                    
+                    // Pure Gravity Posture Check (Triggers when screen is tilted > 30° off flat)
+                    let isSideRolled = abs(gx) > 0.45 || abs(gy) > 0.45   // Rolled on left/right/top edge
+                    let isTiltedOrFlipped = gz > -0.80                      // Tilted > 35° off flat table level
+                    let isRolledOverState = isSideRolled || isTiltedOrFlipped
+                    
+                    // Safe posture angle calculation for display / telemetry (clamped to prevent NaN)
+                    let safeGz = min(1.0, max(0.0, abs(gz)))
+                    let phiDeg = acos(safeGz) * (180.0 / Double.pi)
+                    
+                    if isRolledOverState {
+                        // 1. Posture Duration Tracker (Continuous time in rolled-over orientation)
+                        if self.standalone_rollover_posture_start_time == nil {
+                            self.standalone_rollover_posture_start_time = now
+                        }
+                        let postureDurationMs = now.timeIntervalSince(self.standalone_rollover_posture_start_time!) * 1000.0
+                        
+                        // 2. Resting / Quiet Arrival Tracker (||w|| < 45 deg/s in rolled-over orientation)
+                        let isQuietRest = gyroMagDegS < self.STANDALONE_ROLLOVER_REST_GYRO_DEG_S
+                        if isQuietRest {
+                            if self.standalone_rollover_rest_start_time == nil {
+                                self.standalone_rollover_rest_start_time = now
+                            }
+                        } else {
+                            // Rotation still in progress during flip — reset rest timer, but DO NOT reset posture timer!
+                            self.standalone_rollover_rest_start_time = nil
+                        }
+                        
+                        let restDurationMs = self.standalone_rollover_rest_start_time != nil ?
+                            now.timeIntervalSince(self.standalone_rollover_rest_start_time!) * 1000.0 : 0.0
+                        
+                        // Dual-Window Trigger Condition:
+                        // Either arrived at rest (||w|| < 45 deg/s for >= 150ms) OR sustained posture for >= 250ms
+                        let hasSettledAtRest = isQuietRest && (restDurationMs >= self.STANDALONE_ROLLOVER_MIN_REST_MS) // >= 150ms
+                        let hasSustainedPosture = postureDurationMs >= self.STANDALONE_ROLLOVER_MAX_POSTURE_MS        // >= 250ms
+                        
+                        if hasSettledAtRest || hasSustainedPosture {
+                            if now.timeIntervalSince(self.lastSent) * 1000.0 >= self.DEBOUNCE_MS {
+                                // Output clear timestamped console logs for handheld rollover
+                                self.logStateTransition(String(format: "🔄 [HANDHELD ROLLOVER DETECTED] Posture phi = %.1f° | gx = %.2fg | gy = %.2fg | gz = %.2fg (Settled for %.0fms).", phiDeg, gx, gy, gz, hasSettledAtRest ? restDurationMs : postureDurationMs))
+                                
+                                self.debugStatus = String(format: "🔄 ROLLOVER DETECTED (STATIC / SLOW TIPPED) | phi=%.0f°", phiDeg)
+                                
+                                // Trigger backend alert dispatch
+                                self.confirmAccident(
+                                    dynX: uX,
+                                    dynY: uY,
+                                    dynZ: uZ,
+                                    gravZ: motion.gravity.z,
+                                    gyroX: motion.rotationRate.x,
+                                    gyroY: motion.rotationRate.y,
+                                    gyroZ: motion.rotationRate.z,
+                                    acc: max(totalMagG * 9.81, 9.81),
+                                    durationMs: max(hasSettledAtRest ? restDurationMs : postureDurationMs, 150.0),
+                                    isPhoneFall: false,
+                                    freeFallMs: 0.0,
+                                    classifiedSide: "ROLLOVER DETECTED (STATIC / SLOW TIPPED)"
+                                )
+                            }
+                            
+                            // Reset tracking variables after trigger to prevent multi-frame spam
+                            self.standalone_rollover_posture_start_time = nil
+                            self.standalone_rollover_rest_start_time = nil
+                            return
+                        } else {
+                            if isQuietRest {
+                                self.debugStatus = String(format: "🔄 Rollover Settling: phi=%.0f° (rest=%.0f/150ms)", phiDeg, restDurationMs)
+                            } else {
+                                self.debugStatus = String(format: "🔄 Rollover Motion: phi=%.0f° (||w||=%.0f°/s | %.0f/250ms)", phiDeg, gyroMagDegS, postureDurationMs)
+                            }
+                        }
+                    } else {
+                        // Phone is upright — reset both posture and resting timers
+                        self.standalone_rollover_posture_start_time = nil
+                        self.standalone_rollover_rest_start_time = nil
+                    }
+                } else {
+                    self.standalone_rollover_posture_start_time = nil
+                    self.standalone_rollover_rest_start_time = nil
                 }
                 
                 // Normal monitoring status update (when no event is actively pending)
