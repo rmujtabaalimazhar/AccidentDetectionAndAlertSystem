@@ -54,11 +54,52 @@ namespace Accident_Detection_Backend.Models
         public bool? IsFreeFall { get; set; }
 
         // Rollover & Roof Inversion Telemetry (Calibrated from 360° Lateral Rollover Dataset)
+        public double? GravityX { get; set; }
+        public double? GravX
+        {
+            get => GravityX;
+            set { if (value.HasValue) GravityX = value.Value; }
+        }
+        public double? GravityY { get; set; }
+        public double? GravY
+        {
+            get => GravityY;
+            set { if (value.HasValue) GravityY = value.Value; }
+        }
         public double? GravityZ { get; set; }
         public double? GravZ
         {
             get => GravityZ;
             set { if (value.HasValue) GravityZ = value.Value; }
+        }
+
+        // 4-Meter Test Track Distance/Time Calibration (Committee Demo Feature)
+        public double? ElapsedTimeSeconds { get; set; }
+        public double? Elapsed_Time_Seconds
+        {
+            get => ElapsedTimeSeconds;
+            set { if (value.HasValue) ElapsedTimeSeconds = value.Value; }
+        }
+        public double? TrackDistanceMeters { get; set; } = 4.0;
+        public double? Track_Distance_Meters
+        {
+            get => TrackDistanceMeters;
+            set { if (value.HasValue) TrackDistanceMeters = value.Value; }
+        }
+
+        // Dual-Scenario Mode Telemetry (Stationary Mode vs. Active Driving Mode)
+        public bool IsDrivingMode { get; set; } = false;
+        public bool? Is_Driving_Mode
+        {
+            get => IsDrivingMode;
+            set { if (value.HasValue) IsDrivingMode = value.Value; }
+        }
+
+        public bool IsManualHardBrake { get; set; } = false;
+        public bool? Is_Manual_Hard_Brake
+        {
+            get => IsManualHardBrake;
+            set { if (value.HasValue) IsManualHardBrake = value.Value; }
         }
     }
 }

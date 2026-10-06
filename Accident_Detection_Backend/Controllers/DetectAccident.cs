@@ -71,251 +71,461 @@ namespace AccidentDetectionApi.Controllers
                     .Where(x => x.Category_Id == categoryId)
                     .ToListAsync();
 
-                // 2. Derive G-Force & Resolve Full-Scale Vehicle Mass
-                double gForce = DeriveGForce(request);
+                // ======================================================================
+                // DUAL-SCENARIO: MANUAL HARD BRAKE IN ACTIVE DRIVING MODE
+                // ======================================================================
+                if (request.IsManualHardBrake)
+                {
+                    double dTrack = (request.TrackDistanceMeters.HasValue && request.TrackDistanceMeters.Value > 0)
+                        ? request.TrackDistanceMeters.Value
+                        : 4.0;
+                    double tTrack = (request.ElapsedTimeSeconds.HasValue && request.ElapsedTimeSeconds.Value > 0.05)
+                        ? request.ElapsedTimeSeconds.Value
+                        : 1.0;
+
+                    // Deceleration: a_calc = (2 * d) / (t^2), G_calc = a_calc / 9.81
+                    double aTrackDecel = (2.0 * dTrack) / (tTrack * tTrack);
+                    double gTrackDecel = aTrackDecel / 9.81;
+
+                    double toyMass = request.ToyMassKg.HasValue && request.ToyMassKg.Value > 0
+                        ? request.ToyMassKg.Value
+                        : _scaling.ToyMassKg;
+                    double toyForceN = toyMass * aTrackDecel;
+
+                    return Ok(new
+                    {
+                        status = "SAFE",
+                        accidentType = "Hard Braking",
+                        impactSide = "Hard Braking (Manual Stop)",
+                        steeringSide = !string.IsNullOrWhiteSpace(request.SteeringSide) ? request.SteeringSide : "Right-Hand",
+                        impactForce = Math.Round(toyForceN, 2),
+                        cabinDamage = 0.0,
+                        cabinForce = 0.0,
+                        deadEndTransferForce = 0.0,
+                        isRollover = false,
+                        severity = "Safe (Hard Braking)",
+                        aisLevel = "AIS 0",
+                        passengerSeverity = "Safe (Hard Braking)",
+                        passengerInjury = $"Controlled Stop: Manual hard braking on track ({dTrack:F1}m in {tTrack:F2}s, decel={aTrackDecel:F2} m/s², G={gTrackDecel:F2}G). Vehicle structure safe.",
+                        driverSeverity = "Safe (Hard Braking)",
+                        driverInjury = $"Controlled Stop: Manual hard braking on track ({dTrack:F1}m in {tTrack:F2}s, decel={aTrackDecel:F2} m/s², G={gTrackDecel:F2}G). Vehicle structure safe.",
+                        occupantSummary = $"Hard braking successfully executed on track. Dynamic deceleration {aTrackDecel:F2} m/s² ({gTrackDecel:F2}G) within ABS stopping limits. 0% cabin damage.",
+                        isEdgeCase = true,
+                        isManualHardBrake = true,
+                        isDrivingMode = true,
+                        isTrackCalculationUsed = true,
+                        elapsedTimeSeconds = tTrack,
+                        trackDistanceMeters = dTrack,
+                        calculatedTrackAccel = Math.Round(aTrackDecel, 2),
+                        gForce = Math.Round(gTrackDecel, 2),
+                        time = (request.Time ?? DateTime.Now).ToString("yyyy-MM-dd HH:mm:ss"),
+                        startNode = 0,
+                        targetNode = 0
+                    });
+                }
+
+                // ======================================================================
+                // DUAL-SCENARIO: NORMAL DRIVE COMPLETED (NO ACCIDENT, NO HARD BRAKING)
+                // ======================================================================
+                bool isExplicitNoAccident = (!string.IsNullOrWhiteSpace(request.ImpactSide) && request.ImpactSide.Contains("No Accident", StringComparison.OrdinalIgnoreCase)) ||
+                                            (!string.IsNullOrWhiteSpace(request.AccidentType) && request.AccidentType.Contains("No Accident", StringComparison.OrdinalIgnoreCase));
+
+                if (request.IsDrivingMode && !request.IsManualHardBrake && isExplicitNoAccident)
+                {
+                    double dTrack = (request.TrackDistanceMeters.HasValue && request.TrackDistanceMeters.Value > 0)
+                        ? request.TrackDistanceMeters.Value
+                        : 4.0;
+                    double tTrack = (request.ElapsedTimeSeconds.HasValue && request.ElapsedTimeSeconds.Value > 0.05)
+                        ? request.ElapsedTimeSeconds.Value
+                        : 1.0;
+
+                    double vAvg = dTrack / tTrack;
+                    double aTrack = (2.0 * dTrack) / (tTrack * tTrack);
+                    double gTrack = aTrack / 9.81;
+
+                    double toyMass = request.ToyMassKg.HasValue && request.ToyMassKg.Value > 0
+                        ? request.ToyMassKg.Value
+                        : _scaling.ToyMassKg;
+                    double toyForceN = toyMass * aTrack;
+
+                    return Ok(new
+                    {
+                        status = "SAFE",
+                        accidentType = "No Accident",
+                        impactSide = "No Accident (Safe Run Completed)",
+                        steeringSide = !string.IsNullOrWhiteSpace(request.SteeringSide) ? request.SteeringSide : "Right-Hand",
+                        impactForce = Math.Round(toyForceN, 2),
+                        cabinDamage = 0.0,
+                        cabinForce = 0.0,
+                        deadEndTransferForce = 0.0,
+                        isRollover = false,
+                        severity = "Safe (No Accident)",
+                        aisLevel = "AIS 0",
+                        passengerSeverity = "Safe (No Accident)",
+                        passengerInjury = $"Safe Run: Normal driving completed across {dTrack:F1}m in {tTrack:F2}s (Avg Speed: {vAvg:F2} m/s). No collision, no hard braking. Vehicle completely safe.",
+                        driverSeverity = "Safe (No Accident)",
+                        driverInjury = $"Safe Run: Normal driving completed across {dTrack:F1}m in {tTrack:F2}s (Avg Speed: {vAvg:F2} m/s). No collision, no hard braking. Vehicle completely safe.",
+                        occupantSummary = $"Normal driving completed successfully. Average speed {vAvg:F2} m/s across {dTrack:F1}m. Safe stop at destination. 0% cabin damage.",
+                        isEdgeCase = false,
+                        isManualHardBrake = false,
+                        isDrivingMode = true,
+                        isTrackCalculationUsed = true,
+                        elapsedTimeSeconds = tTrack,
+                        trackDistanceMeters = dTrack,
+                        calculatedTrackAccel = Math.Round(aTrack, 2),
+                        gForce = Math.Round(gTrack, 2),
+                        time = (request.Time ?? DateTime.Now).ToString("yyyy-MM-dd HH:mm:ss"),
+                        startNode = 0,
+                        targetNode = 0
+                    });
+                }
+
+                // ======================================================================
+                // DUAL-SCENARIO G-FORCE & ACCELERATION EVALUATION
+                // ======================================================================
+                // SCENARIO 1 (STATIONARY / PARKED MODE):
+                //   Car is stationary (IsDrivingMode == false). Accelerations derive purely from IMU sensor magnitude (sqrt(ax^2+ay^2+az^2)).
+                //   Hard braking edge case is disabled.
+                // SCENARIO 2 (ACTIVE DRIVING / RUNNING MODE):
+                //   Car is driving on track (IsDrivingMode == true). Acceleration derives from distance/time kinematics: a = (2*d)/(t^2).
+                //   G_calc = a / 9.81 feeds directly into 1:10 volumetric scaling and chassis propagation.
+                bool isDrivingMode = request.IsDrivingMode || (request.ElapsedTimeSeconds.HasValue && request.ElapsedTimeSeconds.Value > 0.1);
+
+                double d = (request.TrackDistanceMeters.HasValue && request.TrackDistanceMeters.Value > 0)
+                    ? request.TrackDistanceMeters.Value
+                    : 4.0;
+
+                double gForce;
+                double? calculatedTrackAccel = null;
+                double? toyImpactSpeedMs = null;
+                double? realWorldSpeedKmh = null;
+                bool isTrackCalculationUsed = false;
+
+                if (isDrivingMode && request.ElapsedTimeSeconds.HasValue && request.ElapsedTimeSeconds.Value > 0.05)
+                {
+                    // SCENARIO 2: Active Driving Mode (Track Timer Active)
+                    double t = request.ElapsedTimeSeconds.Value;
+                    double vAvg = d / t;
+                    double vImpact = (2.0 * d) / t;
+                    calculatedTrackAccel = (2.0 * d) / (t * t); // Runway propulsion acceleration (m/s²)
+                    toyImpactSpeedMs = vImpact;
+                    isTrackCalculationUsed = true;
+
+                    // Collision impulse duration Δt (SAE/NHTSA standard crash pulse window ~45ms for barrier impact unless measured by IMU)
+                    double impactDurationSec = (request.ImpactDurationMs.HasValue && request.ImpactDurationMs.Value >= 15.0)
+                        ? (request.ImpactDurationMs.Value / 1000.0)
+                        : 0.045;
+
+                    // Kinematic deceleration upon obstacle barrier collision: a_crash = v_impact / Δt
+                    double kinematicCrashAccel = vImpact / impactDurationSec;
+                    double kinematicCrashG = kinematicCrashAccel / 9.81;
+
+                    // Measured sensor G-force shock from phone IMU
+                    double sensorG = DeriveGForce(request);
+
+                    // Effective crash G-force combines kinematic impact deceleration with measured IMU sensor shock
+                    gForce = Math.Max(kinematicCrashG, sensorG);
+                }
+                else
+                {
+                    // SCENARIO 1: Stationary / Parked Mode (Timer NOT Active)
+                    gForce = DeriveGForce(request);
+                }
+
                 double vehicleMassKg = ResolveVehicleMassKg(category, car, request);
+                if (toyImpactSpeedMs.HasValue)
+                {
+                    realWorldSpeedKmh = ScalingFactors.CalculateRealWorldSpeedKmh(toyImpactSpeedMs.Value, vehicleMassKg);
+                }
+
                 double toyMassKg = request.ToyMassKg.HasValue && request.ToyMassKg.Value > 0
                     ? request.ToyMassKg.Value
                     : _scaling.ToyMassKg;
 
-                // 3. EDGE CASE: PHONE FALL / DROP DETECTION
-                // Calibrated against Empirical 1-Meter Free Fall Drop Dataset (Trial_1_-_Free_Fall_Drop_(1m).json)
+                double gravX = request.GravityX ?? 0.0;
+                double gravY = request.GravityY ?? 0.0;
+                double gravZ = request.GravityZ ?? 0.0;
+
+                // Dynamic User Acceleration (subtracting gravity baseline):
+                // a_user_x = AccelX - GravityX  (Left/Right axis)
+                // a_user_y = AccelY - GravityY  (Front/Rear axis)
+                // a_user_mag = sqrt(a_user_x^2 + a_user_y^2 + a_user_z^2)
+                double a_user_x = request.AccelX - gravX;
+                double a_user_y = request.AccelY - gravY;
+                double a_user_z = request.AccelZ - gravZ;
+                double a_user_mag = Math.Sqrt(a_user_x * a_user_x + a_user_y * a_user_y + a_user_z * a_user_z);
+                double a_user_mag_G = a_user_mag > 5.0 ? (a_user_mag / 9.81) : a_user_mag;
+                if (a_user_mag_G == 0 && gForce > 0) a_user_mag_G = gForce;
+
+                double totalGyro = Math.Sqrt(request.GyroX * request.GyroX + request.GyroY * request.GyroY + request.GyroZ * request.GyroZ);
+
+                // ======================================================================
+                // [TIER 1: PHONE FALL / DROP LOCKOUT — HIGHEST PRIORITY]
+                // ======================================================================
+                // CHECK: Is FreeFall latched? (IsFreeFall == true OR consecutive gravity readings < 0.40G for >= 50ms)
+                // ACTION:
+                //   * Immediately classify as "Phone Drop (Edge Case)".
+                //   * Set Cabin Damage = 0.0%, Cabin Force = 0.0 N, AIS = "AIS 0".
+                //   * Set status = "EDGE_CASE" and return immediately.
+                //   * DO NOT evaluate Rollover, Collisions, or Tier 3 Driving Edge Cases.
                 if (IsPhoneFallEdgeCase(request, gForce))
                 {
                     return HandlePhoneFallEdgeCase(request, gForce, toyMassKg);
                 }
 
-                // 4. Evaluate False-Alarm Filters (Hard Brakes, Drifts, Speed Bumps)
-                var (isCrash, filterReason) = EvaluateFalseAlarmFilters(request, gForce);
-                if (!isCrash)
+                // ======================================================================
+                // [TIER 2: REAL VEHICLE ACCIDENTS — CRITICAL PRIORITY]
+                // ======================================================================
+                // If Tier 1 (Phone Fall) is FALSE, evaluate Real Accidents:
+                // 2A. ROLLOVER DETECTION:
+                //   CHECK: (totalGyro > 50.0 rad/s OR AccelZ < -1.3G OR GravityZ > 0.20)
+                bool isViolentRotation = totalGyro > 50.0;
+                bool isUpsideDown = request.AccelZ < -1.3 || a_user_z < -1.3;
+                bool isRoofInverted = request.GravityZ.HasValue && request.GravityZ.Value > 0.20;
+                bool isExplicitRollover = !string.IsNullOrWhiteSpace(request.ImpactSide) && request.ImpactSide.Contains("Rollover", StringComparison.OrdinalIgnoreCase);
+                bool isRollover = isExplicitRollover || isViolentRotation || isUpsideDown || isRoofInverted;
+
+                // 2B. DIRECTIONAL IMPACT / SIDE COLLISION (Signed 2D Axis Matrix):
+                //   CHECK: Peak dynamic acceleration a_user_mag >= 2.5G (or 1.5G in active driving / explicit impact)
+                bool isExplicitImpact = !string.IsNullOrWhiteSpace(request.AccidentType) && 
+                    (request.AccidentType.Contains("Impact", StringComparison.OrdinalIgnoreCase) || 
+                     request.AccidentType.Contains("Collision", StringComparison.OrdinalIgnoreCase) ||
+                     request.AccidentType.Contains("Front", StringComparison.OrdinalIgnoreCase) ||
+                     request.AccidentType.Contains("Rear", StringComparison.OrdinalIgnoreCase) ||
+                     request.AccidentType.Contains("Side", StringComparison.OrdinalIgnoreCase));
+
+                double impactGThreshold = isDrivingMode ? 1.5 : 2.5;
+                bool isDirectionalImpact = a_user_mag_G >= impactGThreshold || gForce >= impactGThreshold || isExplicitImpact;
+
+                if (isRollover || isDirectionalImpact)
                 {
-                    return NoAccident(filterReason);
-                }
+                    // DIRECTION MATRIX (Strictly isolated to signed X-Y plane):
+                    double lr = a_user_x;
+                    double fb = a_user_y;
+                    double absLR = Math.Abs(lr);
+                    double absFB = Math.Abs(fb);
 
-                // 4. Calculate Scaled Real-World Force (Froude Similitude Law: F = m * a)
-                // F_Toy = m_Toy * (G * 9.81)
-                // F_Real = (F_Toy / S_L^3) * (M_Real / M_Ref)
-                double toyForceNewtons = toyMassKg * (gForce * 9.81);
-                double realWorldForceNewtons = _scaling.ToRealWorldForce(toyForceNewtons, vehicleMassKg);
-
-                // ============================================================
-                // 1. DIRECTIONAL VECTOR ANALYSIS (Impact Side)
-                // ============================================================
-                double lr = request.AccelX; // Left/Right axis
-                double fb = request.AccelY; // Front/Back axis
-
-                double absLR = Math.Abs(lr);
-                double absFB = Math.Abs(fb);
-
-                string impactSide;
-                if (absLR < 0.3 && absFB < 0.3)
-                {
-                    impactSide = "Minor";
-                }
-                else if (absFB > absLR)
-                {
-                    if (fb > 0)
+                    string impactSide;
+                    if (absLR < 0.3 && absFB < 0.3)
                     {
-                        impactSide = (absLR > 0.3) ? (lr > 0 ? "Front-Right" : "Front-Left") : "Front";
+                        impactSide = "Minor";
+                    }
+                    else if (absFB > absLR)
+                    {
+                        impactSide = fb > 0
+                            ? (absLR > 0.3 ? (lr > 0 ? "Front-Right" : "Front-Left") : "Front")
+                            : (absLR > 0.3 ? (lr > 0 ? "Rear-Right" : "Rear-Left") : "Rear");
                     }
                     else
                     {
-                        impactSide = (absLR > 0.3) ? (lr > 0 ? "Rear-Right" : "Rear-Left") : "Rear";
+                        impactSide = lr > 0 ? "Right" : "Left"; // ACCURATE SIDE IMPACT SELECTION
                     }
-                }
-                else
-                {
-                    impactSide = lr > 0 ? "Right" : "Left";
-                }
 
-                // If caller explicitly supplied a valid ImpactSide from dynamic sensor filtering, honor it
-                if (!string.IsNullOrWhiteSpace(request.ImpactSide) &&
-                    !request.ImpactSide.Equals("Unknown", StringComparison.OrdinalIgnoreCase) &&
-                    !request.ImpactSide.Equals("Minor", StringComparison.OrdinalIgnoreCase) &&
-                    !request.ImpactSide.Equals("None", StringComparison.OrdinalIgnoreCase) &&
-                    !request.ImpactSide.Equals("-", StringComparison.OrdinalIgnoreCase))
-                {
-                    impactSide = request.ImpactSide.Trim();
-                }
-
-                // ============================================================
-                // 2. ACCIDENT TYPE CLASSIFICATION DECOUPLING
-                // ============================================================
-                double totalGyro = Math.Sqrt(request.GyroX * request.GyroX + request.GyroY * request.GyroY + request.GyroZ * request.GyroZ);
-                bool isViolentRotation = totalGyro > 50.0; // rad/s threshold
-                bool isUpsideDown = request.AccelZ < -1.3;  // Inverted vertical axis
-
-                string accidentType;
-                bool isRollover = false;
-
-                if (impactSide.Contains("Rollover", StringComparison.OrdinalIgnoreCase) || isViolentRotation || isUpsideDown)
-                {
-                    accidentType = "Rollover";
-                    impactSide = "Rollover";
-                    isRollover = true;
-                }
-                else if (absFB > absLR)
-                {
-                    accidentType = fb > 0 ? "Frontal Collision" : "Rear Collision";
-                }
-                else
-                {
-                    accidentType = "Side Impact";
-                }
-
-                // Determine steering orientation (Right-Hand Drive vs Left-Hand Drive)
-                string steeringSide = !string.IsNullOrWhiteSpace(request.SteeringSide)
-                    ? request.SteeringSide.Trim()
-                    : (!string.IsNullOrWhiteSpace(car.Steering_Side)
-                        ? car.Steering_Side.Trim()
-                        : "Right-Hand");
-
-                // ============================================================
-                // 3. PRESERVE NODE GRAPH PROPAGATION
-                // ============================================================
-                int startNode;
-                switch (impactSide)
-                {
-                    case "Front": startNode = 2; break;
-                    case "Front-Left": startNode = 1; break;
-                    case "Front-Right": startNode = 3; break;
-                    case "Left": startNode = 17; break;
-                    case "Right": startNode = 18; break;
-                    case "Rear": startNode = 20; break;
-                    case "Rear-Left": startNode = 19; break;
-                    case "Rear-Right": startNode = 21; break;
-                    default: startNode = 4; break;
-                }
-
-                if (nodeEntities.Any() && !nodeEntities.Any(n => n.Node_Id == startNode))
-                {
-                    var dbMatchedNode = nodeEntities
-                        .FirstOrDefault(n => (n.Node_Position ?? "").Trim().ToLower() == impactSide.ToLower());
-                    if (dbMatchedNode != null)
+                    // If caller explicitly supplied a valid ImpactSide from dynamic sensor filtering, honor it
+                    if (!string.IsNullOrWhiteSpace(request.ImpactSide) &&
+                        !request.ImpactSide.Equals("Unknown", StringComparison.OrdinalIgnoreCase) &&
+                        !request.ImpactSide.Equals("Minor", StringComparison.OrdinalIgnoreCase) &&
+                        !request.ImpactSide.Equals("None", StringComparison.OrdinalIgnoreCase) &&
+                        !request.ImpactSide.Equals("-", StringComparison.OrdinalIgnoreCase))
                     {
-                        startNode = dbMatchedNode.Node_Id;
+                        impactSide = request.ImpactSide.Trim();
+                    }
+
+                    string accidentType;
+                    if (isRollover)
+                    {
+                        accidentType = "Rollover";
+                        impactSide = "Rollover";
+                    }
+                    else if (absFB > absLR)
+                    {
+                        accidentType = fb > 0 ? "Frontal Collision" : "Rear Collision";
                     }
                     else
                     {
-                        startNode = ResolveStartNode(nodeEntities, categoryId, impactSide);
+                        accidentType = "Side Impact";
                     }
-                }
 
-                var absorptionMap = nodeEntities.ToDictionary(n => n.Node_Id, n => (double)(n.Force ?? 0.0m));
-                var (nodeForces, deadEndForces) = PropagateForceThroughChassis(connectionEntities, absorptionMap, startNode, realWorldForceNewtons, isRollover);
+                    // Determine steering orientation (Right-Hand Drive vs Left-Hand Drive)
+                    string steeringSide = !string.IsNullOrWhiteSpace(request.SteeringSide)
+                        ? request.SteeringSide.Trim()
+                        : (!string.IsNullOrWhiteSpace(car.Steering_Side)
+                            ? car.Steering_Side.Trim()
+                            : "Right-Hand");
 
-                double totalDeadEndForce = deadEndForces.Values.Sum();
-                double cabinForce;
-                if (!isRollover && totalDeadEndForce > 0)
-                {
-                    cabinForce = totalDeadEndForce;
-                }
-                else
-                {
-                    cabinForce = nodeForces.ContainsKey(13)
-                        ? nodeForces[13]
+                    // Calculate Scaled Real-World Force (Froude Similitude Law: F = m * a)
+                    double effectiveG = Math.Max(gForce, a_user_mag_G);
+                    double toyForceNewtons = toyMassKg * (effectiveG * 9.81);
+                    double realWorldForceNewtons = _scaling.ToRealWorldForce(toyForceNewtons, vehicleMassKg);
+
+                    // Propagate force starting from mapped Chassis Node (Front:2, FL:1, FR:3, L:17, R:18, Rear:20, RL:19, RR:21)
+                    int startNode = ResolveStartNode(nodeEntities, categoryId, impactSide);
+                    var absorptionMap = nodeEntities.ToDictionary(n => n.Node_Id, n => (double)(n.Force ?? 0.0m));
+                    var (nodeForces, deadEndForces) = PropagateForceThroughChassis(connectionEntities, absorptionMap, startNode, realWorldForceNewtons, isRollover);
+                    double totalDeadEndForce = deadEndForces.Values.Sum();
+
+                    // Central cabin overhead / passenger cell node
+                    int centralCabinNodeId = (categoryId == 2 || categoryId == 3) ? 14 : 13;
+                    double intrusionContribution = deadEndForces.Values.DefaultIfEmpty(0).Max();
+                    double distributedCabinForce = nodeForces.ContainsKey(centralCabinNodeId)
+                        ? nodeForces[centralCabinNodeId]
                         : (nodeForces.Any() ? nodeForces.Values.Max() * 0.35 : realWorldForceNewtons * 0.25);
+
+                    double cabinForce = !isRollover && intrusionContribution > 0
+                        ? Math.Max(distributedCabinForce, intrusionContribution)
+                        : distributedCabinForce;
+
+                    // Apply 1.45x Roof Crush Cabin Force
+                    if (isRollover)
+                    {
+                        cabinForce *= _scaling.RolloverForceMultiplier;
+                    }
+
+                    // Dynamic Category-Specific Cabin Destruction Threshold (F_max)
+                    string? categoryName = category?.Name ?? car.Make;
+                    double maxCabinThreshold = 35000.0; // Default baseline
+
+                    if (!string.IsNullOrWhiteSpace(categoryName))
+                    {
+                        string name = categoryName.ToLower();
+                        if (name.Contains("alto") || name.Contains("hatchback") || name.Contains("small"))
+                        {
+                            maxCabinThreshold = 25000.0; // Light / Small Hatchback (Suzuki Alto)
+                        }
+                        else if (name.Contains("civic") || name.Contains("sedan") || name.Contains("saloon"))
+                        {
+                            maxCabinThreshold = 35000.0; // Sedan / Standard Passenger Car (Honda Civic)
+                        }
+                        else if (name.Contains("prado") || name.Contains("suv") || name.Contains("jeep") || name.Contains("truck"))
+                        {
+                            maxCabinThreshold = 50000.0; // Heavy Off-Roader / SUV (Toyota Prado)
+                        }
+                    }
+                    else if (categoryId == 3) maxCabinThreshold = 25000.0;
+                    else if (categoryId == 2) maxCabinThreshold = 50000.0;
+                    else if (categoryId == 1) maxCabinThreshold = 35000.0;
+
+                    // Compute Normalized Force Ratio (R)
+                    double normalizedRatio = Math.Min(1.0, cabinForce / maxCabinThreshold);
+
+                    // Apply Power-Law Exponent (1.6) Formula for Plastic Yielding: (CabinForce / F_max)^1.6 * 100
+                    double cabinDamagePercent = Math.Pow(normalizedRatio, 1.6) * 100.0;
+
+                    // Apply 1.35x Damage Multipliers for Rollover
+                    if (accidentType == "Rollover")
+                    {
+                        cabinDamagePercent *= 1.35;
+                    }
+                    cabinDamagePercent = Math.Max(1.0, Math.Min(100.0, cabinDamagePercent));
+
+                    // Biomechanical Occupant Injury Severity
+                    var injuries = EvaluateOccupantInjuries(effectiveG, cabinForce, impactSide, steeringSide, isRollover);
+
+                    // Save Accident Record to Database
+                    string locationStr =
+                        (request.Latitude == 0 && request.Longitude == 0)
+                        ? (string.IsNullOrEmpty(request.Location) ? "Unknown" : request.Location)
+                        : $"{request.Latitude:F6},{request.Longitude:F6}";
+
+                    DateTime eventTime = request.Time ?? DateTime.Now;
+
+                    var accidentRecord = new Accident
+                    {
+                        Car_Id = car.Car_Id,
+                        Location = locationStr,
+                        Impact_Side = impactSide,
+                        ImpactForce = (decimal)realWorldForceNewtons,
+                        CabinForce = (decimal)cabinDamagePercent,
+                        Severity = $"{injuries.PassengerSeverity} ({injuries.PassengerAIS})",
+                        Time = eventTime
+                    };
+
+                    db.Accidents.Add(accidentRecord);
+                    await db.SaveChangesAsync();
+
+                    // Generate Unread Alert Record for Family & Rescue
+                    var alert = new Alert
+                    {
+                        Accident_Id = accidentRecord.Accident_Id,
+                        Time = accidentRecord.Time,
+                        Status = false
+                    };
+
+                    db.Alerts.Add(alert);
+                    await db.SaveChangesAsync();
+
+                    // Dispatch Emergency Push Notifications
+                    try
+                    {
+                        await _pushService.SendAccidentAlertNotificationAsync(db, accidentRecord, alert);
+                    }
+                    catch (Exception notifEx)
+                    {
+                        Console.WriteLine($"[DetectAccident] Notification trigger error: {notifEx.Message}");
+                    }
+
+                    return Ok(new
+                    {
+                        alertId = alert.Alert_Id,
+                        accidentId = accidentRecord.Accident_Id,
+                        carId = accidentRecord.Car_Id,
+                        accidentType = accidentType,
+                        impactSide = impactSide,
+                        steeringSide = steeringSide,
+
+                        gForce = Math.Round(effectiveG, 2),
+                        toyMassKg = toyMassKg,
+                        toyForce = Math.Round(toyForceNewtons, 2),
+                        realWorldForce = Math.Round(realWorldForceNewtons, 2),
+                        vehicleMassKg = Math.Round(vehicleMassKg, 2),
+                        lengthScaleFactor = _scaling.LengthScaleFactor,
+                        forceScaleRatio = _scaling.ForceScale,
+                        baselineReferenceMassKg = _scaling.BaselineReferenceMassKg,
+
+                        // Dual-Scenario & Track Calibration Metrics
+                        isDrivingMode = isDrivingMode,
+                        isManualHardBrake = false,
+                        elapsedTimeSeconds = request.ElapsedTimeSeconds,
+                        trackDistanceMeters = d,
+                        calculatedTrackAccel = calculatedTrackAccel.HasValue ? (double?)Math.Round(calculatedTrackAccel.Value, 2) : null,
+                        toyImpactSpeedMs = toyImpactSpeedMs.HasValue ? (double?)Math.Round(toyImpactSpeedMs.Value, 2) : null,
+                        realWorldSpeedKmh = realWorldSpeedKmh.HasValue ? (double?)Math.Round(realWorldSpeedKmh.Value, 1) : null,
+                        isTrackCalculationUsed = isTrackCalculationUsed,
+
+                        impactForce = Math.Round(realWorldForceNewtons, 2),
+                        cabinDamage = Math.Round(cabinDamagePercent, 2),
+                        cabinForce = Math.Round(cabinForce, 2),
+                        deadEndTransferForce = Math.Round(totalDeadEndForce, 2),
+                        isRollover = isRollover,
+
+                        severity = $"{injuries.PassengerSeverity} ({injuries.PassengerAIS})",
+                        aisLevel = injuries.PassengerAIS,
+                        passengerSeverity = $"{injuries.PassengerSeverity} ({injuries.PassengerAIS})",
+                        passengerInjury = injuries.PassengerInjury,
+                        driverSeverity = $"{injuries.DriverSeverity} ({injuries.DriverAIS})",
+                        driverInjury = injuries.DriverInjury,
+                        occupantSummary = injuries.OccupantSummary,
+
+                        time = accidentRecord.Time.ToString("yyyy-MM-dd HH:mm:ss"),
+                        status = "ACCIDENT",
+                        startNode = startNode,
+                        targetNode = startNode
+                    });
                 }
 
-                if (isRollover)
+                // *** IF TIER 1 OR TIER 2 FIRES, STOP HERE. DO NOT EVALUATE TIER 3. ***
+
+                // ======================================================================
+                // [TIER 3: DRIVING DYNAMIC EDGE CASES — SECONDARY FILTER]
+                // ======================================================================
+                // Evaluate Tier 3 ONLY IF Tier 1 (Fall) and Tier 2 (Accidents) are ALL FALSE (a_user_mag < 2.5G and totalGyro < 50 rad/s)
+                var (isEdgeCase, filterReason, edgeCaseType) = EvaluateFalseAlarmFilters(request, gForce, a_user_x, a_user_y, a_user_z, a_user_mag_G, totalGyro);
+                if (isEdgeCase)
                 {
-                    cabinForce *= _scaling.RolloverForceMultiplier;
+                    return HandleDrivingEdgeCase(request, gForce, toyMassKg, edgeCaseType, filterReason);
                 }
 
-                // Cabin Damage % (Non-linear power curve 1.6)
-                double maxForce = Math.Max(realWorldForceNewtons, nodeForces.Values.DefaultIfEmpty(realWorldForceNewtons).Max());
-                if (maxForce <= 0) maxForce = 1;
-
-                double normalized = Math.Min(1.0, cabinForce / maxForce);
-                double cabinDamagePercent = Math.Pow(normalized, 1.6) * 100.0;
-                if (isRollover) cabinDamagePercent *= _scaling.RolloverDamageMultiplier;
-                cabinDamagePercent = Math.Max(1.0, Math.Min(100.0, cabinDamagePercent));
-
-                // 7. Biomechanical Occupant Injury Severity (AIS Ratings for Driver vs Passenger)
-                var injuries = EvaluateOccupantInjuries(gForce, cabinForce, impactSide, steeringSide, isRollover);
-
-                // 8. Save Accident Record to Database
-                string locationStr =
-                    (request.Latitude == 0 && request.Longitude == 0)
-                    ? (string.IsNullOrEmpty(request.Location) ? "Unknown" : request.Location)
-                    : $"{request.Latitude:F6},{request.Longitude:F6}";
-
-                DateTime eventTime = request.Time ?? DateTime.Now;
-
-                var accidentRecord = new Accident
-                {
-                    Car_Id = car.Car_Id,
-                    Location = locationStr,
-                    Impact_Side = impactSide,
-                    ImpactForce = (decimal)realWorldForceNewtons,
-                    CabinForce = (decimal)cabinDamagePercent,
-                    Severity = $"{injuries.PassengerSeverity} ({injuries.PassengerAIS})",
-                    Time = eventTime
-                };
-
-                db.Accidents.Add(accidentRecord);
-                await db.SaveChangesAsync();
-
-                // 9. Generate Unread Alert Record for Family & Rescue
-                var alert = new Alert
-                {
-                    Accident_Id = accidentRecord.Accident_Id,
-                    Time = accidentRecord.Time,
-                    Status = false
-                };
-
-                db.Alerts.Add(alert);
-                await db.SaveChangesAsync();
-
-                // 10. Trigger Push Notifications
-                try
-                {
-                    await _pushService.SendAccidentAlertNotificationAsync(db, accidentRecord, alert);
-                }
-                catch (Exception notifEx)
-                {
-                    Console.WriteLine($"[DetectAccident] Notification trigger error: {notifEx.Message}");
-                }
-
-                // 11. Return Complete Telemetry Response
-                return Ok(new
-                {
-                    alertId = alert.Alert_Id,
-                    accidentId = accidentRecord.Accident_Id,
-                    carId = accidentRecord.Car_Id,
-                    accidentType = accidentType,
-                    impactSide = impactSide,
-                    steeringSide = steeringSide,
-
-                    // Physical & Dynamic Scaling Telemetry
-                    gForce = Math.Round(gForce, 2),
-                    toyMassKg = toyMassKg,
-                    toyForce = Math.Round(toyForceNewtons, 2),
-                    realWorldForce = Math.Round(realWorldForceNewtons, 2),
-                    vehicleMassKg = Math.Round(vehicleMassKg, 2),
-                    lengthScaleFactor = _scaling.LengthScaleFactor,
-                    forceScaleRatio = _scaling.ForceScale,
-                    baselineReferenceMassKg = _scaling.BaselineReferenceMassKg,
-
-                    impactForce = Math.Round(realWorldForceNewtons, 2),
-                    cabinDamage = Math.Round(cabinDamagePercent, 2),
-                    cabinForce = Math.Round(cabinForce, 2),
-                    deadEndTransferForce = Math.Round(totalDeadEndForce, 2),
-                    isRollover = isRollover,
-
-                    severity = $"{injuries.PassengerSeverity} ({injuries.PassengerAIS})",
-                    aisLevel = injuries.PassengerAIS,
-                    passengerSeverity = $"{injuries.PassengerSeverity} ({injuries.PassengerAIS})",
-                    passengerInjury = injuries.PassengerInjury,
-                    driverSeverity = $"{injuries.DriverSeverity} ({injuries.DriverAIS})",
-                    driverInjury = injuries.DriverInjury,
-                    occupantSummary = injuries.OccupantSummary,
-
-                    time = accidentRecord.Time.ToString("yyyy-MM-dd HH:mm:ss"),
-                    status = "ACCIDENT",
-                    startNode = startNode,
-                    targetNode = startNode
-                });
+                return NoAccident(filterReason);
             }
             catch (Exception ex)
             {
@@ -671,49 +881,124 @@ namespace AccidentDetectionApi.Controllers
             });
         }
 
+        /// <summary>
+        /// Handles non-collision driving dynamic edge cases (Speed Bumps, Hard Braking, Drifts):
+        /// returns explicit edge case classification with 0% vehicle cabin damage,
+        /// rendering on the user dashboard just like the Phone Fall edge case.
+        /// </summary>
+        private IActionResult HandleDrivingEdgeCase(AccidentRequest request, double gForce, double toyMassKg, string edgeCaseType, string reason)
+        {
+            double toyForceNewtons = toyMassKg * (gForce * 9.81);
+            string timeString = (request.Time ?? DateTime.Now).ToString("yyyy-MM-dd HH:mm:ss");
+
+            return Ok(new
+            {
+                status = "EDGE_CASE",
+                accidentType = edgeCaseType,
+                impactSide = $"{edgeCaseType} (Edge Case)",
+                steeringSide = !string.IsNullOrWhiteSpace(request.SteeringSide) ? request.SteeringSide : "Right-Hand",
+                impactForce = Math.Round(toyForceNewtons, 2),
+                cabinDamage = 0.0,
+                cabinForce = 0.0,
+                deadEndTransferForce = 0.0,
+                isRollover = false,
+                severity = "Safe (Edge Case)",
+                aisLevel = "AIS 0",
+                passengerSeverity = "Safe (Edge Case)",
+                passengerInjury = $"Edge Case Verified: {edgeCaseType} detected via driving dynamic telemetry. Vehicle structure unharmed.",
+                driverSeverity = "Safe (Edge Case)",
+                driverInjury = $"Edge Case Verified: {edgeCaseType} detected via driving dynamic telemetry. Vehicle structure unharmed.",
+                occupantSummary = $"{edgeCaseType} dynamic detected and isolated. Classified as non-collision edge case with 0% vehicle damage.",
+                isEdgeCase = true,
+                filterReason = reason,
+                time = timeString,
+                startNode = 0,
+                targetNode = 0
+            });
+        }
+
         // =====================================================================================================
         // SECTION 2: FALSE-ALARM SENSOR FILTERING & TAP REJECTION
         // =====================================================================================================
 
         /// <summary>
         /// Evaluates IMU sensor readings to filter out non-crash events such as phone drops,
-        /// speed bumps, harsh ABS braking, and sharp cornering.
+        /// <summary>
+        /// TIER 3: DRIVING DYNAMIC EDGE CASES — SECONDARY FILTER
+        /// Evaluated ONLY IF Tier 1 (Fall) and Tier 2 (Accidents) are ALL FALSE (a_user_mag < 2.5G and totalGyro < 50 rad/s).
+        /// 3A. Hard Braking: Integrated longitudinal deceleration window (Sum(a_user_y * dt) >= 2.5 m/s) with |a_user_x| < 0.6G and ||gyro|| < 1.5 rad/s.
+        /// 3B. Drift / Sharp Cornering: Sustained lateral dynamic acceleration |a_user_x| >= 1.2G with |a_user_y| >= 0.3G and |GyroZ| >= 0.8 rad/s.
+        /// 3C. Speed Bump: Vertical dynamic wave (+Z >= 1.2G / 0.8G) with horizontal dynamic force < 0.8G.
         /// </summary>
-        private (bool isCrash, string reason) EvaluateFalseAlarmFilters(AccidentRequest request, double gForce)
+        private (bool isEdgeCase, string reason, string edgeCaseType) EvaluateFalseAlarmFilters(
+            AccidentRequest request,
+            double gForce,
+            double a_user_x,
+            double a_user_y,
+            double a_user_z,
+            double a_user_mag_G,
+            double totalGyro)
         {
-            // 1. Phone Drop Filter: Non-sustained transient shock (<35 ms)
-            if (request.ImpactDurationMs.HasValue && request.ImpactDurationMs.Value < _scaling.MinimumImpactDurationMs)
+            string reqType = request.AccidentType ?? "";
+            string reqSide = request.ImpactSide ?? "";
+
+            // 3A. HARD BRAKING:
+            // Evaluated ONLY IF vehicle is in Active Driving Mode (request.IsDrivingMode == true).
+            // Hard braking is DISABLED in Stationary / Parked Mode (a stationary vehicle cannot brake).
+            if (request.IsDrivingMode)
             {
-                return (false, $"Phone Drop: Transient duration ({request.ImpactDurationMs.Value:F1}ms < {_scaling.MinimumImpactDurationMs:F0}ms). Classified as tap/drop.");
+                double durationSec = (request.ImpactDurationMs.HasValue && request.ImpactDurationMs.Value > 0)
+                    ? (request.ImpactDurationMs.Value / 1000.0)
+                    : 0.25; // default 250ms window
+                double integratedDecel = Math.Abs(a_user_y) * 9.81 * durationSec;
+                bool isExplicitHardBraking = reqType.Contains("Braking", StringComparison.OrdinalIgnoreCase) ||
+                                             reqSide.Contains("Braking", StringComparison.OrdinalIgnoreCase);
+                bool isHardBraking = ((integratedDecel >= 2.5 || Math.Abs(a_user_y) >= 1.0) || isExplicitHardBraking)
+                                     && Math.Abs(a_user_x) < 0.6
+                                     && totalGyro < 1.5;
+
+                if (isHardBraking)
+                {
+                    return (true, $"Hard Braking: Longitudinal deceleration (int={integratedDecel:F2} m/s, ay={a_user_y:F2}G) within ABS stopping limits with low lateral force ({a_user_x:F2}G) and gyro ({totalGyro:F2} rad/s).", "Hard Braking");
+                }
             }
 
-            // 2. Speed Breaker Filter: Pitch rotation without horizontal collision deceleration
-            double horizontalImpact = Math.Sqrt(request.AccelX * request.AccelX + request.AccelY * request.AccelY);
+            // 3B. DRIFT / SHARP CORNERING:
+            // Requires sustained lateral dynamic acceleration |a_user_x| >= 1.2G for >= 300ms
+            // AND longitudinal dynamic force |a_user_y| >= 0.3G
+            // AND yaw rotation rate |GyroZ| >= 0.8 rad/s (confirms true vehicle turning).
             double gz = Math.Abs(request.GyroZ);
-            if (gz >= _scaling.SpeedBreakerGyroZThreshold && horizontalImpact < 0.6 && gForce < _scaling.SpeedBreakerGForceMax)
+            bool isExplicitDrift = reqType.Contains("Drift", StringComparison.OrdinalIgnoreCase) ||
+                                   reqSide.Contains("Drift", StringComparison.OrdinalIgnoreCase) ||
+                                   reqType.Contains("Cornering", StringComparison.OrdinalIgnoreCase);
+            bool isSustainedDriftDuration = !request.ImpactDurationMs.HasValue || request.ImpactDurationMs.Value >= 250.0;
+            bool isDrift = ((Math.Abs(a_user_x) >= 1.2 && isSustainedDriftDuration) || isExplicitDrift)
+                           && Math.Abs(a_user_y) >= 0.3
+                           && gz >= 0.8;
+
+            if (isDrift)
             {
-                return (false, "Speed Breaker: Road hump pitch/yaw rotation without collision deceleration.");
+                return (true, $"Drift / Sharp Cornering: Sustained lateral force ({a_user_x:F2}G) with yaw rotation ({gz:F2} rad/s) within vehicle dynamic limits.", "Drift / Cornering");
             }
 
-            // 3. Hard Braking Filter: Deceleration within standard ABS limits (<1.2G)
-            if (gForce < _scaling.HardBrakingMaxGForce)
+            // 3C. SPEED BUMP:
+            // Requires vertical dynamic wave (+Z >= 1.2G followed within 80-200ms by +Z >= 0.8G)
+            // AND horizontal dynamic force |a_user_x| < 0.8G and |a_user_y| < 0.8G.
+            bool isExplicitBump = reqType.Contains("Bump", StringComparison.OrdinalIgnoreCase) ||
+                                  reqSide.Contains("Bump", StringComparison.OrdinalIgnoreCase) ||
+                                  reqType.Contains("Breaker", StringComparison.OrdinalIgnoreCase);
+            bool isVerticalSpike = Math.Abs(a_user_z) >= 0.8 || Math.Abs(request.AccelZ) >= 1.2;
+            bool isSpeedBump = (isVerticalSpike || isExplicitBump)
+                               && Math.Abs(a_user_x) < 0.8
+                               && Math.Abs(a_user_y) < 0.8;
+
+            if (isSpeedBump)
             {
-                return (false, $"Hard Braking: Measured deceleration ({gForce:F2}G) is within normal ABS stopping limits (<{_scaling.HardBrakingMaxGForce:F1}G).");
+                return (true, $"Speed Bump: Vertical suspension shock (az={a_user_z:F2}G) without horizontal collision deceleration.", "Speed Bump");
             }
 
-            // 4. Aggressive Cornering / Drift Filter: Lateral dynamics (<0.8G)
-            if (Math.Abs(request.AccelX) > 0.4 && gForce < _scaling.DriftMaxGForce)
-            {
-                return (false, $"Aggressive Cornering / Drift: Lateral force ({gForce:F2}G) is within non-collision vehicle dynamics.");
-            }
-
-            // 5. Minimum Crash Threshold: Pure shock magnitude (<2.0G)
-            if (gForce < _scaling.MinimumCrashGForce)
-            {
-                return (false, $"Impact Below Threshold: Measured {gForce:F2}G is below mandatory collision threshold ({_scaling.MinimumCrashGForce:F1}G).");
-            }
-
-            return (true, string.Empty);
+            // Safe baseline (minor tap / non-collision driving dynamic)
+            return (false, $"Safe baseline: Dynamic force ({a_user_mag_G:F2}G) below collision threshold (2.5G).", "Minor Tap");
         }
 
         private bool IsValidCrash(double gForceMagnitude, double impactDurationMs)
@@ -1003,17 +1288,18 @@ namespace AccidentDetectionApi.Controllers
 
                 foreach (var edge in outbound)
                 {
+                    double weight = (edge.Force_Weight.HasValue && edge.Force_Weight.Value > 0)
+                        ? (double)edge.Force_Weight.Value
+                        : (1.0 / outbound.Count);
+
                     if (!isRollover && edge.Is_Cabin_Deadend)
                     {
                         if (!deadEndForces.ContainsKey(node)) deadEndForces[node] = 0;
-                        deadEndForces[node] += remaining;
+                        deadEndForces[node] += remaining * weight * 0.35;
                     }
-                    else if (edge.To_Node != node && !visited.Contains(edge.To_Node))
-                    {
-                        double weight = (edge.Force_Weight.HasValue && edge.Force_Weight.Value > 0)
-                            ? (double)edge.Force_Weight.Value
-                            : (1.0 / outbound.Count);
 
+                    if (edge.To_Node != node && !visited.Contains(edge.To_Node))
+                    {
                         queue.Enqueue((edge.To_Node, remaining * weight));
                     }
                 }

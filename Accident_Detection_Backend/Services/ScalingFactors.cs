@@ -95,6 +95,19 @@ namespace Accident_Detection_Backend.Services
             double testRigForceNewtons = TestRigMassKg * (gForceMagnitude * 9.81);
             return ToRealWorldForce(testRigForceNewtons, databaseVehicleMassKg);
         }
+
+        /// <summary>
+        /// Froude Kinematic Speed Scaling: Converts toy vehicle speed (m/s) to scaled full-size vehicle speed (km/h)
+        /// Formula: v_base = v_toy / sqrt(0.10), v_real = v_base * sqrt(M_veh / 1500) * 3.6
+        /// </summary>
+        public static double CalculateRealWorldSpeedKmh(double toySpeedMs, double vehicleMassKg)
+        {
+            double speedScaleFactor = Math.Sqrt(0.10); // 0.3162277
+            double baseRealSpeedMs = toySpeedMs / speedScaleFactor;
+            double massFactor = Math.Sqrt(vehicleMassKg / 1500.0);
+            double finalRealSpeedMs = baseRealSpeedMs * massFactor;
+            return finalRealSpeedMs * 3.6; // Convert m/s to km/h
+        }
     }
 
     /// <summary>
